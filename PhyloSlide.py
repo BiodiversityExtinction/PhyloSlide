@@ -2,46 +2,65 @@
 """
 PhyloSlide: sliding-window phylogenomics pipeline
 
-What it does
+Key features
 ------------
-1) (Optional) Generate sliding windows from a reference FASTA index using bedtools makewindows
-   and write regions as samtools faidx-style coordinates: chr:start-end (1-based inclusive).
+1) (Optional) Generate sliding windows using bedtools makewindows and write regions as:
+      chr:start-end   (samtools faidx format; 1-based inclusive)
 
-2) Extract per-sample window FASTAs with samtools faidx (pads missing regions with Ns).
-   Window header format:   >CODENAME|chr:start-end
-   Per-sample concat:      >CODENAME  (concatenation of window sequences in regions-file order)
+2) Extract per-sample windows with samtools faidx:
+   - Window FASTA header:   >CODENAME|chr:start-end
+   - Missing region: pads with Ns of correct length
+   - Per-sample concatenation (all regions, unfiltered): OUT/<CODENAME>/<CODENAME>_concat.fasta
 
-3) (Optional, --runtrees) Build per-window multi-FASTA alignments and:
-   - filter windows by missing data (drop if ANY sample has N fraction > --maxN)
-   - optionally mask transition-containing columns (TV-only) with --transversions
-   - filter windows by minimum parsimony-informative sites (PI) with --minpi
-   - infer window trees with IQ-TREE2 in parallel across windows (--jobs)
-   - build reference tree (concat or ASTRAL) and compute gCF/sCF
-   - optionally build a “dating” supermatrix with windows matching the reference topology
-     and with minimum bootstrap support threshold (--topofilter)
+3) (Optional) Tree pipeline (--runtrees):
+   - Missingness filter: drop window if ANY sample has N fraction > --maxN
+   - Build per-window multi-FASTA MSAs: OUT/Combined_windows/<region>.fa
+   - Optional conservative aDNA mode: --transversions (mask AG/CT columns to N across taxa)
+   - minPI filter on MSAs (after TV masking if enabled): --minpi
+   - Window trees with IQ-TREE2, parallel across windows: --jobs
+   - Reference tree: concat (IQ-TREE) or ASTRAL (optional)
+   - gCF/sCF with IQ-TREE2
+   - Optional topology filter for dating supermatrix: --topofilter
+
+Intermediate files management
+-----------------------------
+- By default, per-sample per-window FASTAs are DELETED immediately after the per-window MSA is created.
+  (This avoids millions of small files.)
+- Use --no_delete_windows to keep per-sample per-window FASTAs.
+
+- Optionally archive the "many small files" directories into a tar.gz at end of a successful run:
+    OUT/phyloslide_intermediates.tar.gz
+  Archives:
+    - Combined_windows/
+    - trees/window_trees/
+    - trees/window_logs/
+  Keeps unarchived:
+    - Combined/
+    - filtering/
+    - trees/reference/
+    - trees/concordance/
+    - trees/all_window_trees.trs   (small + useful)
+    - phyloslide.log
 
 Dependencies
 ------------
-External tools (required depending on flags):
-  Always:
-    - samtools
-    - seqtk
-  If --makewindows:
-    - bedtools
-  If --runtrees:
-    - iqtree2
-  If --ref astral:
-    - java
-    - ASTRAL jar file (provided via --astral)
-  If --topofilter or --ref astral:
-    - Python package: biopython
+Always:
+  - samtools
+  - seqtk
 
-Python:
-  - Python >= 3.9 recommended
-  - biopython required only for topology matching and ASTRAL collapsing steps
+If --makewindows:
+  - bedtools
 
-Author: (you)
-License: (choose; e.g., MIT)
+If --runtrees:
+  - iqtree2
+
+If --ref astral:
+  - java
+  - ASTRAL jar via --astral
+  - biopython (Python package)
+
+If --topofilter:
+  - biopython (Python package)
 """
 
 from __future__ import annotations
@@ -53,6 +72,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -248,19 +268,13 @@ def generate_regions_with_bedtools(
             kept_contigs += 1
 
     if kept_contigs == 0:
-        raise SystemExit(
-            "ERROR: No contigs left after applying --min_scaffold_len / --chroms filters."
-        )
+        raise SystemExit("ERROR: No contigs left after applying --min_scaffold_len / --chroms filters.")
 
     if regions_out is None:
         regions_out = outdir / f"regions.w{window}.s{step}.min{min_len}.txt"
 
-    log(
-        f"Generating windows with bedtools makewindows (w={window}, step={step}), contigs={kept_contigs}",
-        runlog,
-    )
+    log(f"Generating windows with bedtools makewindows (w={window}, step={step}), contigs={kept_contigs}", runlog)
 
-    # bedtools outputs BED (0-based, half-open). Convert to 1-based inclusive.
     p = subprocess.run(
         ["bedtools", "makewindows", "-g", str(lengths_path), "-w", str(window), "-s", str(step)],
         stdout=subprocess.PIPE,
@@ -276,7 +290,7 @@ def generate_regions_with_bedtools(
             continue
         chrom, start0, end0 = ln.split("\t")[:3]
         s1 = int(start0) + 1
-        e1 = int(end0)
+        e1 = int(end0)  # bed end is exclusive; after +1 start, end becomes inclusive
         out_lines.append(f"{chrom}:{s1}-{e1}")
 
     if not out_lines:
@@ -406,6 +420,46 @@ def iqtree_window(job: WindowJob) -> Tuple[str, bool, str]:
 
 
 # -----------------------------
+# Archiving intermediates (tar.gz)
+# -----------------------------
+def archive_intermediates_tar_gz(outdir: Path, runlog: Path) -> None:
+    """
+    Archive (and then delete originals):
+      - Combined_windows/
+      - trees/window_trees/
+      - trees/window_logs/
+
+    Keep unarchived:
+      - trees/all_window_trees.trs
+      - Combined/, filtering/, trees/reference/, trees/concordance/, logs
+    """
+    candidates = [
+        outdir / "Combined_windows",
+        outdir / "trees" / "window_trees",
+        outdir / "trees" / "window_logs",
+    ]
+    existing = [p for p in candidates if p.exists()]
+    if not existing:
+        log("Archive requested but no intermediate directories found to archive.", runlog)
+        return
+
+    archive_path = outdir / "phyloslide_intermediates.tar.gz"
+    log(f"Archiving intermediates to: {archive_path}", runlog)
+
+    with tarfile.open(archive_path, "w:gz") as tf:
+        for p in existing:
+            tf.add(p, arcname=p.relative_to(outdir))
+
+    log("Archive created successfully. Deleting archived directories...", runlog)
+    for p in existing:
+        if p.is_dir():
+            shutil.rmtree(p)
+        else:
+            p.unlink(missing_ok=True)
+    log("Archiving cleanup complete.", runlog)
+
+
+# -----------------------------
 # Preflight checks
 # -----------------------------
 def preflight_checks(args: argparse.Namespace) -> None:
@@ -427,15 +481,13 @@ def preflight_checks(args: argparse.Namespace) -> None:
         if args.chroms is not None and not args.chroms.exists():
             problems.append(f"--chroms not found: {args.chroms}")
 
-    # Regions required unless makewindows
     if not args.makewindows and args.regions is None:
         problems.append("You must provide --regions unless using --makewindows")
 
-    # Always-required external tools
+    # External tools
     which_or_die("samtools", problems)
     which_or_die("seqtk", problems)
 
-    # Additional tools
     if args.makewindows:
         which_or_die("bedtools", problems)
 
@@ -449,12 +501,12 @@ def preflight_checks(args: argparse.Namespace) -> None:
         elif not args.astral.exists():
             problems.append(f"--astral jar not found: {args.astral}")
 
-    # Python deps (only if needed)
+    # Python deps (only when needed)
     if args.runtrees and (args.topofilter or args.ref == "astral"):
         try:
             import Bio  # noqa: F401
         except Exception:
-            problems.append("Python dependency missing: biopython (pip install biopython)")
+            problems.append("Python dependency missing: biopython (install with: pip install biopython)")
 
     # Numeric sanity
     if args.window <= 0:
@@ -482,7 +534,7 @@ def preflight_checks(args: argparse.Namespace) -> None:
 
 
 # -----------------------------
-# Main
+# CLI
 # -----------------------------
 def build_argparser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
@@ -490,22 +542,20 @@ def build_argparser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawTextHelpFormatter,
         description=(
             "PhyloSlide: sliding-window phylogenomics pipeline.\n\n"
-            "Typical workflows:\n"
-            "  (A) Use your own regions file (chr:start-end):\n"
-            "      phyloslide --input samples.tsv --regions regions.txt --outdir OUT\n\n"
-            "  (B) Generate regions internally (20 kb windows, 1 Mb step):\n"
-            "      phyloslide --input samples.tsv --outdir OUT --makewindows --refgenome ref.fa \\\n"
-            "                --window 20000 --step 1000000 --min_scaffold_len 14000000\n\n"
-            "  Add tree inference (parallel across windows):\n"
-            "      phyloslide ... --runtrees --jobs 32 --iqtree_threads_per_job 1\n\n"
-            "  aDNA-style transversions-only masking (TV-only, conservative):\n"
-            "      phyloslide ... --runtrees --transversions\n\n"
-            "  Create a dating supermatrix from windows matching the reference topology:\n"
-            "      phyloslide ... --runtrees --topofilter --minbs 90 --topomode exact\n"
+            "Common examples:\n"
+            "  1) Extraction only:\n"
+            "     phyloslide --input samples.tsv --regions regions.txt --outdir OUT\n\n"
+            "  2) Generate windows internally (20kb windows, 1Mb step) + run trees in parallel:\n"
+            "     phyloslide --input samples.tsv --outdir OUT \\\n"
+            "               --makewindows --refgenome ref.fa --window 20000 --step 1000000 \\\n"
+            "               --runtrees --jobs 32 --iqtree_threads_per_job 1\n\n"
+            "  3) aDNA conservative mode (TV-only masking):\n"
+            "     phyloslide ... --runtrees --transversions\n\n"
+            "  4) Build dating supermatrix from windows matching reference topology:\n"
+            "     phyloslide ... --runtrees --topofilter --minbs 90 --topomode exact\n"
         ),
     )
 
-    # Core inputs
     ap.add_argument(
         "--input",
         required=True,
@@ -539,8 +589,8 @@ def build_argparser() -> argparse.ArgumentParser:
         "--makewindows",
         action="store_true",
         help=(
-            "Generate a regions file internally using bedtools makewindows.\n"
-            "Requires --refgenome or --fai, plus bedtools in PATH.\n"
+            "Generate regions internally using bedtools makewindows.\n"
+            "Requires --refgenome or --fai and bedtools in PATH.\n"
             "Output regions are written as chr:start-end (1-based inclusive)."
         ),
     )
@@ -549,7 +599,7 @@ def build_argparser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Reference genome FASTA used ONLY for window generation (bedtools makewindows).\n"
+            "Reference genome FASTA used ONLY for window generation.\n"
             "PhyloSlide will create <refgenome>.fai using samtools faidx if missing.\n"
             "Required for --makewindows unless --fai is provided."
         ),
@@ -558,34 +608,21 @@ def build_argparser() -> argparse.ArgumentParser:
         "--fai",
         type=Path,
         default=None,
-        help=(
-            "FASTA index file (.fai) used for window generation (alternative to --refgenome).\n"
-            "Format: contig<TAB>length<...>\n"
-        ),
+        help="FASTA index (.fai) used for window generation (alternative to --refgenome).",
     )
-    ap.add_argument(
-        "--window",
-        type=int,
-        default=20000,
-        help="Window size for --makewindows (bp). Default: 20000.",
-    )
-    ap.add_argument(
-        "--step",
-        type=int,
-        default=1000000,
-        help="Step size (slide) for --makewindows (bp). Default: 1000000.",
-    )
+    ap.add_argument("--window", type=int, default=20000, help="Window size for --makewindows (bp). Default: 20000.")
+    ap.add_argument("--step", type=int, default=1000000, help="Step size for --makewindows (bp). Default: 1000000.")
     ap.add_argument(
         "--min_scaffold_len",
         type=int,
         default=0,
-        help="Only include contigs/scaffolds with length >= this value when generating windows. Default: 0.",
+        help="Only include contigs/scaffolds with length >= this value in window generation. Default: 0.",
     )
     ap.add_argument(
         "--chroms",
         type=Path,
         default=None,
-        help="Optional whitelist of contig names to include in window generation (one name per line).",
+        help="Optional whitelist of contig names to include in window generation (one per line).",
     )
     ap.add_argument(
         "--regions_out",
@@ -593,7 +630,7 @@ def build_argparser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Optional output path for generated regions.\n"
-            "If not provided, defaults to:\n"
+            "Default:\n"
             "  <outdir>/regions.w<window>.s<step>.min<min_scaffold_len>.txt"
         ),
     )
@@ -606,7 +643,7 @@ def build_argparser() -> argparse.ArgumentParser:
             "Run tree pipeline after extraction:\n"
             "  - missingness filter (--maxN)\n"
             "  - optional TV-only masking (--transversions)\n"
-            "  - min parsimony-informative sites filter (--minpi)\n"
+            "  - minPI filter (--minpi)\n"
             "  - IQ-TREE2 per window (parallel across windows)\n"
             "  - reference tree (concat or ASTRAL)\n"
             "  - gCF/sCF (IQ-TREE2)"
@@ -619,8 +656,7 @@ def build_argparser() -> argparse.ArgumentParser:
             "Conservative transversions-only masking (aDNA-friendly).\n"
             "For each alignment column, if both A and G OR both C and T are present (ignoring N/gaps),\n"
             "mask the entire column to N across all taxa.\n"
-            "When enabled, ALL downstream alignments (concat reference / sCF / dating supermatrix)\n"
-            "are built from the TV-masked window alignments (consistent TV-only analysis)."
+            "Downstream alignments (concat/sCF/dating) are built from the masked MSAs for consistency."
         ),
     )
     ap.add_argument(
@@ -629,8 +665,7 @@ def build_argparser() -> argparse.ArgumentParser:
         default=0.5,
         help=(
             "Missing data filter: drop a window if ANY sample has fraction of 'N' > maxN.\n"
-            "Computed on per-sample extracted window sequences (before TV masking).\n"
-            "Default: 0.5"
+            "Computed on per-sample extracted windows (before TV masking). Default: 0.5"
         ),
     )
     ap.add_argument(
@@ -638,11 +673,9 @@ def build_argparser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "Minimum number of parsimony-informative (PI) sites required per window.\n"
-            "Computed on the per-window multi-FASTA alignment AFTER TV masking (if enabled).\n"
-            "If not provided, defaults to:\n"
-            "  - 20 (full data)\n"
-            "  - 10 (with --transversions)"
+            "Minimum number of parsimony-informative sites per window.\n"
+            "Computed on per-window MSAs AFTER TV masking (if enabled).\n"
+            "Default: 20 (full data) or 10 (with --transversions)."
         ),
     )
 
@@ -651,76 +684,44 @@ def build_argparser() -> argparse.ArgumentParser:
         "--ref",
         choices=["concat", "astral"],
         default="concat",
-        help=(
-            "Reference tree method:\n"
-            "  concat : IQ-TREE2 on concatenated alignment (default)\n"
-            "  astral : ASTRAL species tree from (optionally collapsed) window trees"
-        ),
+        help="Reference tree method: concat (default) or astral.",
     )
-    ap.add_argument(
-        "--astral",
-        type=Path,
-        default=None,
-        help="Path to ASTRAL jar (required if --ref astral).",
-    )
+    ap.add_argument("--astral", type=Path, default=None, help="Path to ASTRAL jar (required if --ref astral).")
     ap.add_argument(
         "--collapse",
         type=int,
         default=30,
-        help=(
-            "For --ref astral: collapse gene-tree branches with support < collapse before running ASTRAL.\n"
-            "Default: 30"
-        ),
+        help="For --ref astral: collapse gene-tree branches with support < collapse before ASTRAL. Default: 30.",
     )
 
     # IQ-TREE parameters
-    ap.add_argument(
-        "--model",
-        default="GTR+R6",
-        help="IQ-TREE2 substitution model used for window trees and concat reference. Default: GTR+R6",
-    )
-    ap.add_argument(
-        "--bootstrap",
-        type=int,
-        default=1000,
-        help="IQ-TREE2 ultrafast bootstrap replicates (-bb). Default: 1000",
-    )
-    ap.add_argument(
-        "--scf",
-        type=int,
-        default=100,
-        help="IQ-TREE2 site concordance factor replicates (--scf). Default: 100",
-    )
+    ap.add_argument("--model", default="GTR+R6", help="IQ-TREE model for window trees and concat reference. Default: GTR+R6")
+    ap.add_argument("--bootstrap", type=int, default=1000, help="IQ-TREE ultrafast bootstraps (-bb). Default: 1000")
+    ap.add_argument("--scf", type=int, default=100, help="IQ-TREE site concordance factor reps (--scf). Default: 100")
 
     # Parallelism
     ap.add_argument(
         "--iqtree_threads_per_job",
         type=int,
         default=1,
-        help=(
-            "Threads per IQ-TREE2 window job (-nt). Default: 1\n"
-            "For window-level parallelism, keep this small (1–2) and increase --jobs."
-        ),
+        help="Threads per IQ-TREE window job (-nt). Default: 1. Increase --jobs for window-level parallelism.",
     )
     ap.add_argument(
         "--jobs",
         type=int,
         default=None,
-        help=(
-            "Number of windows to run concurrently (window-level parallelism).\n"
-            "If omitted, auto-selected as min(32, floor(cores / iqtree_threads_per_job))."
-        ),
+        help="Number of windows to run concurrently. Default: auto = min(32, floor(cores / iqtree_threads_per_job)).",
     )
 
-    # Topology filtering / dating supermatrix
+    # Topology filtering
     ap.add_argument(
         "--topofilter",
         action="store_true",
         help=(
-            "Create a filtered concatenated alignment (dating supermatrix) using only windows that:\n"
-            "  (1) passed missingness and minPI filters\n"
-            "  (2) match the reference topology (unrooted; see --topomode)\n"
-            "  (3) have minimum internal bootstrap >= --minbs\n"
+            "Create a filtered concatenation (dating supermatrix) using only windows that:\n"
+            "  - passed missingness and minPI filters\n"
+            "  - match the reference topology (unrooted; see --topomode)\n"
+            "  - have minimum internal bootstrap >= --minbs\n"
             "Requires biopython."
         ),
     )
@@ -728,17 +729,26 @@ def build_argparser() -> argparse.ArgumentParser:
         "--topomode",
         choices=["exact", "compatible"],
         default="exact",
-        help=(
-            "Topology matching mode:\n"
-            "  exact       : gene-tree splits must equal reference splits (default)\n"
-            "  compatible  : gene-tree splits must be a subset of reference splits (allows unresolved trees)"
-        ),
+        help="Topology matching: exact (default) or compatible (allows unresolved gene trees).",
+    )
+    ap.add_argument("--minbs", type=int, default=90, help="Minimum internal bootstrap for topofilter windows. Default: 90")
+
+    # File management
+    ap.add_argument(
+        "--no_delete_windows",
+        action="store_true",
+        help="Do NOT delete per-sample per-window FASTAs after MSAs are built (debugging option).",
     )
     ap.add_argument(
-        "--minbs",
-        type=int,
-        default=90,
-        help="Minimum internal bootstrap support required for topofilter windows. Default: 90",
+        "--archive",
+        action="store_true",
+        help=(
+            "At the end of a successful run, archive the directories that contain many small files into:\n"
+            "  OUT/phyloslide_intermediates.tar.gz\n"
+            "Then delete those directories from OUT.\n"
+            "Archives: Combined_windows/, trees/window_trees/, trees/window_logs/\n"
+            "Keeps: Combined/, filtering/, trees/reference/, trees/concordance/, trees/all_window_trees.trs"
+        ),
     )
 
     return ap
@@ -748,15 +758,15 @@ def main() -> None:
     ap = build_argparser()
     args = ap.parse_args()
 
-    # Default minPI if not provided
+    # Defaults
     if args.minpi is None:
         args.minpi = 10 if args.transversions else 20
 
-    # Create outdir + runlog early (but do not do any real work before preflight)
+    # Create outdir + log path early (but do not do substantive work before preflight)
     args.outdir.mkdir(parents=True, exist_ok=True)
     runlog = args.outdir / "phyloslide.log"
 
-    # Preflight checks must happen BEFORE running anything substantive.
+    # Preflight checks (dependencies + inputs)
     preflight_checks(args)
 
     log("Starting PhyloSlide", runlog)
@@ -769,7 +779,7 @@ def main() -> None:
     W = args.jobs if args.jobs is not None else min(32, auto_jobs)
     log(f"Parallel design: cores={C}, threads/job={T}, concurrent windows={W}", runlog)
 
-    # If requested, generate regions file now (this is “real work”, but still before extraction).
+    # Generate regions if requested
     if args.makewindows:
         args.regions = generate_regions_with_bedtools(
             outdir=args.outdir,
@@ -815,16 +825,14 @@ def main() -> None:
 
         tmp = sample_dir / ".tmp.faidx"
 
-        # Extract each region (skip if already exists)
-        missing_padded = 0
         extracted = 0
+        padded = 0
         for r in regions:
             out_fa = sample_dir / f"{r}.fasta"
             if out_fa.exists() and out_fa.stat().st_size > 0:
                 continue
 
             L = region_len(r)
-            # samtools faidx region -> tmp file
             with tmp.open("w") as ftmp:
                 p = subprocess.run(
                     ["samtools", "faidx", str(genome), r],
@@ -834,21 +842,19 @@ def main() -> None:
                 )
 
             if p.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
-                # seqtk seq -l0 to flatten
+                # Flatten
                 seq = subprocess.check_output(["seqtk", "seq", "-l0", str(tmp)], text=True)
                 lines = [x for x in seq.splitlines() if x.strip()]
                 if not lines or not lines[0].startswith(">"):
                     raise RuntimeError(f"{code}: seqtk produced invalid output for {r}")
-                # Replace header
                 header = f"{code}|{r}"
                 seq_str = "".join(lines[1:]).strip()
                 fasta_write_one(out_fa, header, seq_str)
                 extracted += 1
             else:
-                # Missing region -> pad Ns
                 header = f"{code}|{r}"
                 fasta_write_one(out_fa, header, "N" * L)
-                missing_padded += 1
+                padded += 1
                 with slog.open("a") as f:
                     f.write(f"[{now()}] MISSING padded: {r} (len={L})\n")
 
@@ -864,7 +870,7 @@ def main() -> None:
                 seq_parts.append(s)
             fasta_write_one(concat, code, "".join(seq_parts))
 
-        log(f"{code}: extracted={extracted} padded_missing={missing_padded}", runlog)
+        log(f"{code}: extracted={extracted} padded_missing={padded}", runlog)
 
     log("Step 1 complete.", runlog)
 
@@ -907,20 +913,37 @@ def main() -> None:
     log(f"maxN kept={len(kept)} dropped={len(regions)-len(kept)}", runlog)
 
     # -----------------------------
-    # Step 3: Build per-window MSAs (kept after maxN)
+    # Step 3: Build per-window MSAs (kept after maxN) + delete per-sample window FASTAs (default)
     # -----------------------------
     comb_win_dir = args.outdir / "Combined_windows"
     comb_win_dir.mkdir(parents=True, exist_ok=True)
 
-    log("Step 3: Build per-window multi-FASTA alignments (kept.maxN)", runlog)
+    log("Step 3: Build per-window MSAs (kept.maxN)", runlog)
+    log("        Per-sample per-window FASTAs will be deleted after each MSA is created (use --no_delete_windows to keep).", runlog)
 
+    deleted_windows = 0
     for r in kept:
         msa = comb_win_dir / f"{r}.fa"
         if msa.exists() and msa.stat().st_size > 0:
+            # If MSA already exists, we assume previous run may have already deleted windows.
             continue
+
         with msa.open("w") as out:
             for code in codenames:
-                out.write((args.outdir / code / f"{r}.fasta").read_text())
+                win = args.outdir / code / f"{r}.fasta"
+                out.write(win.read_text())
+
+        if not args.no_delete_windows:
+            for code in codenames:
+                win = args.outdir / code / f"{r}.fasta"
+                try:
+                    win.unlink()
+                    deleted_windows += 1
+                except FileNotFoundError:
+                    pass
+
+    if not args.no_delete_windows:
+        log(f"Deleted per-sample window FASTAs after MSA creation: {deleted_windows}", runlog)
 
     # -----------------------------
     # Step 3b: TV-only masking (in place on MSAs)
@@ -942,7 +965,7 @@ def main() -> None:
     with kept_final.open("w") as ok, dropped_pi.open("w") as bad:
         for r in kept:
             msa = comb_win_dir / f"{r}.fa"
-            headers, seqs = read_msa_fasta(msa)
+            _, seqs = read_msa_fasta(msa)
             if not seqs:
                 bad.write(f"{r}\tempty_msa\n")
                 continue
@@ -963,7 +986,6 @@ def main() -> None:
 
     # -----------------------------
     # Step 4: Build concatenated alignment across FINAL kept windows
-    #         If TV masking enabled, build from masked MSAs (consistent TV-only analysis)
     # -----------------------------
     comb_dir = args.outdir / "Combined"
     comb_dir.mkdir(parents=True, exist_ok=True)
@@ -1000,7 +1022,34 @@ def main() -> None:
                         raise RuntimeError(f"Could not find taxon {code} in {msa}")
                     out.write(seq + "\n")
                 else:
-                    _, seq = fasta_read_one(args.outdir / code / f"{r}.fasta")
+                    # NOTE: in default mode we deleted per-sample window FASTAs; therefore we must also pull from MSAs
+                    # to remain robust. This is fine and keeps behavior consistent.
+                    msa = comb_win_dir / f"{r}.fa"
+                    seq = None
+                    with msa.open() as f:
+                        take = False
+                        buf = []
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            if line.startswith(">"):
+                                if take:
+                                    seq = "".join(buf)
+                                    break
+                                # headers in MSAs are CODENAME|region for per-sample windows;
+                                # but we store as >CODENAME|region when building windows.
+                                # Here, accept either exact CODENAME or CODENAME|region in MSA.
+                                h = line[1:].split()[0]
+                                take = (h == code) or h.startswith(code + "|")
+                                buf = []
+                            else:
+                                if take:
+                                    buf.append(line)
+                        if seq is None and take:
+                            seq = "".join(buf)
+                    if seq is None:
+                        raise RuntimeError(f"Could not find taxon {code} in {msa}")
                     out.write(seq + "\n")
             out.write("\n")
 
@@ -1059,7 +1108,7 @@ def main() -> None:
 
     # Collect gene trees (deterministic order = kept2)
     all_trs = tree_dir / "all_window_trees.trs"
-    log(f"Writing gene-tree set: {all_trs}", runlog)
+    log(f"Writing gene-tree set (NOT archived): {all_trs}", runlog)
     with all_trs.open("w") as out:
         for r in kept2:
             safe = sanitize_region(r)
@@ -1075,7 +1124,6 @@ def main() -> None:
         log("Step 6: Build concatenated reference tree (IQ-TREE2)", runlog)
         pref = ref_dir / "Reference"
         ref_log = ref_dir / "Reference.iqtree.log"
-        # Use modest threads for this single run (avoid oversubscribing)
         ref_threads = max(1, min(C, 10))
         run_cmd(
             [
@@ -1092,7 +1140,6 @@ def main() -> None:
     else:
         log("Step 6: Build ASTRAL reference tree (collapse then ASTRAL)", runlog)
 
-        # Biopython is guaranteed by preflight when needed
         from io import StringIO
         from Bio import Phylo  # type: ignore
 
@@ -1290,41 +1337,44 @@ def main() -> None:
             for code in codenames:
                 out.write(f">{code}\n")
                 for r in kept_topo:
-                    if args.transversions:
-                        msa = comb_win_dir / f"{r}.fa"
-                        seq = None
-                        with msa.open() as f:
-                            take = False
-                            buf: List[str] = []
-                            for line in f:
-                                line = line.strip()
-                                if not line:
-                                    continue
-                                if line.startswith(">"):
-                                    if take:
-                                        seq = "".join(buf)
-                                        break
-                                    take = (line[1:].split()[0] == code)
-                                    buf = []
-                                else:
-                                    if take:
-                                        buf.append(line)
-                            if seq is None and take:
-                                seq = "".join(buf)
-                        if seq is None:
-                            raise RuntimeError(f"Could not find taxon {code} in {msa}")
-                        out.write(seq + "\n")
-                    else:
-                        _, seq = fasta_read_one(args.outdir / code / f"{r}.fasta")
-                        out.write(seq + "\n")
+                    msa = comb_win_dir / f"{r}.fa"
+                    seq = None
+                    with msa.open() as f:
+                        take = False
+                        buf: List[str] = []
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            if line.startswith(">"):
+                                if take:
+                                    seq = "".join(buf)
+                                    break
+                                h = line[1:].split()[0]
+                                take = (h == code) or h.startswith(code + "|")
+                                buf = []
+                            else:
+                                if take:
+                                    buf.append(line)
+                        if seq is None and take:
+                            seq = "".join(buf)
+                    if seq is None:
+                        raise RuntimeError(f"Could not find taxon {code} in {msa}")
+                    out.write(seq + "\n")
                 out.write("\n")
+
+    # -----------------------------
+    # Optional archiving (tar.gz) for many-small-files directories
+    # -----------------------------
+    if args.archive:
+        archive_intermediates_tar_gz(args.outdir, runlog)
 
     log("Done.", runlog)
     log("Key outputs:", runlog)
     log(f"  regions used: {args.regions}", runlog)
     log(f"  kept.final:   {filtering_dir / 'regions.kept.final.txt'}", runlog)
-    log(f"  concat:       {all_concat}", runlog)
-    log(f"  gene trees:   {all_trs}", runlog)
+    log(f"  Combined/:    {comb_dir}", runlog)
+    log(f"  gene trees:   {all_trs}  (kept unarchived)", runlog)
     log(f"  ref tree:     {ref_tree}", runlog)
     log(f"  CF prefix:    {cf_dir / 'Finaltrees'}", runlog)
 
