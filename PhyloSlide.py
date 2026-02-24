@@ -380,6 +380,41 @@ def mask_transitions_inplace(msa_path: Path) -> None:
     write_msa_fasta(msa_path, headers, ["".join(x) for x in seq_lists])
 
 
+def get_taxon_seq_from_msa(msa_path: Path, code: str) -> str:
+    """
+    Return the sequence for a taxon from a multi-FASTA alignment.
+
+    Accept headers:
+      >CODENAME
+      >CODENAME|anything   (e.g. CODENAME|chr:start-end)
+
+    This prevents failures when headers contain per-window suffixes.
+    """
+    seq: Optional[str] = None
+    with msa_path.open() as f:
+        take = False
+        buf: List[str] = []
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if take:
+                    seq = "".join(buf)
+                    break
+                h = line[1:].split()[0]
+                take = (h == code) or h.startswith(code + "|")
+                buf = []
+            else:
+                if take:
+                    buf.append(line)
+        if seq is None and take:
+            seq = "".join(buf)
+    if seq is None:
+        raise RuntimeError(f"Could not find taxon {code} in {msa_path}")
+    return seq
+
+
 # -----------------------------
 # Parallel IQ-TREE
 # -----------------------------
@@ -396,7 +431,9 @@ class WindowJob:
 
 def iqtree_window(job: WindowJob) -> Tuple[str, bool, str]:
     """
-    Resumable: if .treefile exists and non-empty, skip.
+    Resumable:
+      - If .treefile exists and non-empty: skip.
+      - Otherwise run IQ-TREE2 with -redo to avoid checkpoint collisions (.ckp.gz).
     """
     treefile = job.out_prefix.with_suffix(".treefile")
     if treefile.exists() and treefile.stat().st_size > 0:
@@ -409,6 +446,7 @@ def iqtree_window(job: WindowJob) -> Tuple[str, bool, str]:
         "-bb", str(job.bootstrap),
         "-nt", str(job.iqtree_threads),
         "-pre", str(job.out_prefix),
+        "-redo",
     ]
     try:
         run_cmd(cmd, job.log_path)
@@ -607,7 +645,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--fai",
         type=Path,
-        default=None,
+       default=None,
         help="FASTA index (.fai) used for window generation (alternative to --refgenome).",
     )
     ap.add_argument("--window", type=int, default=20000, help="Window size for --makewindows (bp). Default: 20000.")
@@ -997,60 +1035,9 @@ def main() -> None:
         for code in codenames:
             out.write(f">{code}\n")
             for r in kept2:
-                if args.transversions:
-                    msa = comb_win_dir / f"{r}.fa"
-                    seq = None
-                    with msa.open() as f:
-                        take = False
-                        buf: List[str] = []
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            if line.startswith(">"):
-                                if take:
-                                    seq = "".join(buf)
-                                    break
-                                take = (line[1:].split()[0] == code)
-                                buf = []
-                            else:
-                                if take:
-                                    buf.append(line)
-                        if seq is None and take:
-                            seq = "".join(buf)
-                    if seq is None:
-                        raise RuntimeError(f"Could not find taxon {code} in {msa}")
-                    out.write(seq + "\n")
-                else:
-                    # NOTE: in default mode we deleted per-sample window FASTAs; therefore we must also pull from MSAs
-                    # to remain robust. This is fine and keeps behavior consistent.
-                    msa = comb_win_dir / f"{r}.fa"
-                    seq = None
-                    with msa.open() as f:
-                        take = False
-                        buf = []
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            if line.startswith(">"):
-                                if take:
-                                    seq = "".join(buf)
-                                    break
-                                # headers in MSAs are CODENAME|region for per-sample windows;
-                                # but we store as >CODENAME|region when building windows.
-                                # Here, accept either exact CODENAME or CODENAME|region in MSA.
-                                h = line[1:].split()[0]
-                                take = (h == code) or h.startswith(code + "|")
-                                buf = []
-                            else:
-                                if take:
-                                    buf.append(line)
-                        if seq is None and take:
-                            seq = "".join(buf)
-                    if seq is None:
-                        raise RuntimeError(f"Could not find taxon {code} in {msa}")
-                    out.write(seq + "\n")
+                msa = comb_win_dir / f"{r}.fa"
+                seq = get_taxon_seq_from_msa(msa, code)
+                out.write(seq + "\n")
             out.write("\n")
 
     # -----------------------------
@@ -1133,6 +1120,7 @@ def main() -> None:
                 "-bb", str(args.bootstrap),
                 "-nt", str(ref_threads),
                 "-pre", str(pref),
+                "-redo",
             ],
             ref_log,
         )
@@ -1216,6 +1204,7 @@ def main() -> None:
             "--scf", str(args.scf),
             "-nt", str(cf_threads),
             "-pre", str(cf_pref),
+            "-redo",
         ],
         cf_log,
     )
@@ -1338,28 +1327,7 @@ def main() -> None:
                 out.write(f">{code}\n")
                 for r in kept_topo:
                     msa = comb_win_dir / f"{r}.fa"
-                    seq = None
-                    with msa.open() as f:
-                        take = False
-                        buf: List[str] = []
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            if line.startswith(">"):
-                                if take:
-                                    seq = "".join(buf)
-                                    break
-                                h = line[1:].split()[0]
-                                take = (h == code) or h.startswith(code + "|")
-                                buf = []
-                            else:
-                                if take:
-                                    buf.append(line)
-                        if seq is None and take:
-                            seq = "".join(buf)
-                    if seq is None:
-                        raise RuntimeError(f"Could not find taxon {code} in {msa}")
+                    seq = get_taxon_seq_from_msa(msa, code)
                     out.write(seq + "\n")
                 out.write("\n")
 
