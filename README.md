@@ -13,7 +13,7 @@ PhyloSlide is a sliding-window phylogenomics pipeline for extracting genomic win
 - For each sample and region:
   - extracts the window using `samtools faidx`
   - pads with Ns if the region is missing
-  - writes window FASTAs with header format: `>CODENAME|chr:start-end`
+  - writes window FASTAs with header format: `>CODENAME`
 - Writes a per-sample concatenated sequence across all regions:
   - `OUT/<CODENAME>/<CODENAME>_concat.fasta`
 
@@ -97,6 +97,7 @@ Polar             /path/to/Polar.fa
 ```
 
 - No spaces in codenames
+- Codenames must be unique (duplicates are rejected)
 - FASTA files must be indexed (`samtools faidx`) — PhyloSlide will create `.fai` if missing
 
 ### Regions File (`--regions`)
@@ -125,7 +126,7 @@ Instead of manually creating a regions file, PhyloSlide can generate one using `
 Example: 20 kb windows sliding every 1 Mb:
 
 ```bash
-python phyloslide.py \
+python3 PhyloSlide.py \
   --input samples.tsv \
   --outdir OUT \
   --makewindows \
@@ -137,7 +138,7 @@ python phyloslide.py \
 Restrict to long scaffolds:
 
 ```bash
-python phyloslide.py \
+python3 PhyloSlide.py \
   --input samples.tsv \
   --outdir OUT \
   --makewindows \
@@ -150,7 +151,7 @@ python phyloslide.py \
 Restrict to specific chromosomes:
 
 ```bash
-python phyloslide.py \
+python3 PhyloSlide.py \
   --input samples.tsv \
   --outdir OUT \
   --makewindows \
@@ -169,7 +170,7 @@ python phyloslide.py \
 Example full workflow:
 
 ```bash
-python phyloslide.py \
+python3 PhyloSlide.py \
   --input samples.tsv \
   --outdir OUT \
   --makewindows --refgenome ref.fa --window 20000 --step 1000000 \
@@ -188,7 +189,7 @@ Parallel recommendations:
 ## aDNA Conservative Mode (`--transversions`)
 
 ```bash
-python phyloslide.py \
+python3 PhyloSlide.py \
   --input samples.tsv \
   --regions regions.txt \
   --outdir OUT \
@@ -251,7 +252,7 @@ When `--runtrees` is enabled:
 ## Topology Filtering
 
 ```bash
-python phyloslide.py \
+python3 PhyloSlide.py \
   --input samples.tsv \
   --regions regions.txt \
   --outdir OUT \
@@ -290,6 +291,29 @@ Key files:
 - `all_window_trees.trs`
 - Reference tree
 - Concordance outputs
+
+---
+
+## Reruns, Resume, and Restart
+
+PhyloSlide supports resumable runs and now includes parameter-safety checks.
+
+- Default rerun behavior:
+  - Reuses existing non-empty intermediates when possible.
+  - Writes and checks `OUT/phyloslide.run_manifest.json`.
+  - If parameters differ from a previous run in the same `--outdir`, execution stops to avoid mixed outputs.
+
+- `--force_rebuild`:
+  - Recomputes and overwrites intermediates in-place, even if files already exist.
+  - Allows rerun despite manifest parameter differences.
+
+- `--restart`:
+  - Cleans prior PhyloSlide outputs in `--outdir` and reruns from scratch.
+  - Implies rebuild behavior for that run.
+
+Recommended:
+- Use a new `--outdir` for each parameter set, OR
+- Use `--restart` / `--force_rebuild` explicitly when changing parameters.
 
 ---
 

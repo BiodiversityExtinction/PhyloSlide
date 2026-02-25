@@ -8,7 +8,7 @@ Key features
       chr:start-end   (samtools faidx format; 1-based inclusive)
 
 2) Extract per-sample windows with samtools faidx:
-   - Window FASTA header:   >CODENAME|chr:start-end
+   - Window FASTA header:   >CODENAME
    - Missing region: pads with Ns of correct length
    - Per-sample concatenation (all regions, unfiltered): OUT/<CODENAME>/<CODENAME>_concat.fasta
 
@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as cf
+import json
 import os
 import re
 import shutil
@@ -194,6 +195,7 @@ def read_regions(path: Path) -> List[str]:
 
 def read_samples_table(path: Path) -> List[Tuple[str, Path]]:
     out: List[Tuple[str, Path]] = []
+    seen: set[str] = set()
     with path.open() as f:
         for line in f:
             line = line.strip()
@@ -203,6 +205,9 @@ def read_samples_table(path: Path) -> List[Tuple[str, Path]]:
             if len(parts) < 2:
                 raise ValueError(f"Bad samples line (need 2 columns): {line}")
             code = parts[0]
+            if code in seen:
+                raise ValueError(f"Duplicate sample codename in --input: {code}")
+            seen.add(code)
             fasta = Path(parts[1])
             out.append((code, fasta))
     if not out:
@@ -275,29 +280,37 @@ def generate_regions_with_bedtools(
 
     log(f"Generating windows with bedtools makewindows (w={window}, step={step}), contigs={kept_contigs}", runlog)
 
-    p = subprocess.run(
-        ["bedtools", "makewindows", "-g", str(lengths_path), "-w", str(window), "-s", str(step)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if p.returncode != 0:
-        raise SystemExit("ERROR: bedtools makewindows failed:\n" + p.stderr)
+    windows_written = 0
+    with regions_out.open("w") as out:
+        p = subprocess.Popen(
+            ["bedtools", "makewindows", "-g", str(lengths_path), "-w", str(window), "-s", str(step)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert p.stdout is not None
+        for ln in p.stdout:
+            ln = ln.strip()
+            if not ln:
+                continue
+            parts = ln.split("\t")
+            if len(parts) < 3:
+                p.kill()
+                raise SystemExit(f"ERROR: Unexpected bedtools output line: {ln}")
+            chrom, start0, end0 = parts[0], parts[1], parts[2]
+            s1 = int(start0) + 1
+            e1 = int(end0)  # bed end is exclusive; after +1 start, end becomes inclusive
+            out.write(f"{chrom}:{s1}-{e1}\n")
+            windows_written += 1
 
-    out_lines: List[str] = []
-    for ln in p.stdout.splitlines():
-        if not ln.strip():
-            continue
-        chrom, start0, end0 = ln.split("\t")[:3]
-        s1 = int(start0) + 1
-        e1 = int(end0)  # bed end is exclusive; after +1 start, end becomes inclusive
-        out_lines.append(f"{chrom}:{s1}-{e1}")
+        _, stderr_txt = p.communicate()
+        if p.returncode != 0:
+            raise SystemExit("ERROR: bedtools makewindows failed:\n" + stderr_txt)
 
-    if not out_lines:
+    if windows_written == 0:
         raise SystemExit("ERROR: bedtools produced zero windows (check window/step/filters).")
 
-    regions_out.write_text("\n".join(out_lines) + "\n")
-    log(f"Wrote generated regions: {regions_out} (windows={len(out_lines)})", runlog)
+    log(f"Wrote generated regions: {regions_out} (windows={windows_written})", runlog)
     return regions_out
 
 
@@ -388,7 +401,8 @@ def get_taxon_seq_from_msa(msa_path: Path, code: str) -> str:
       >CODENAME
       >CODENAME|anything   (e.g. CODENAME|chr:start-end)
 
-    This prevents failures when headers contain per-window suffixes.
+    Native PhyloSlide output uses >CODENAME; the fallback with "|" is for
+    backward compatibility with older outputs.
     """
     seq: Optional[str] = None
     with msa_path.open() as f:
@@ -427,6 +441,7 @@ class WindowJob:
     model: str
     bootstrap: int
     log_path: Path
+    force_rebuild: bool = False
 
 
 def iqtree_window(job: WindowJob) -> Tuple[str, bool, str]:
@@ -436,7 +451,7 @@ def iqtree_window(job: WindowJob) -> Tuple[str, bool, str]:
       - Otherwise run IQ-TREE2 with -redo to avoid checkpoint collisions (.ckp.gz).
     """
     treefile = job.out_prefix.with_suffix(".treefile")
-    if treefile.exists() and treefile.stat().st_size > 0:
+    if (not job.force_rebuild) and treefile.exists() and treefile.stat().st_size > 0:
         return (job.region, True, "SKIP(existing treefile)")
 
     cmd = [
@@ -498,6 +513,88 @@ def archive_intermediates_tar_gz(outdir: Path, runlog: Path) -> None:
 
 
 # -----------------------------
+# Run manifest / restart helpers
+# -----------------------------
+def _pstr(p: Optional[Path]) -> Optional[str]:
+    if p is None:
+        return None
+    return str(p.resolve())
+
+
+def build_run_manifest(args: argparse.Namespace) -> Dict[str, object]:
+    return {
+        "schema": 1,
+        "input": _pstr(args.input),
+        "regions": _pstr(args.regions),
+        "outdir": _pstr(args.outdir),
+        "makewindows": bool(args.makewindows),
+        "refgenome": _pstr(args.refgenome),
+        "fai": _pstr(args.fai),
+        "window": int(args.window),
+        "step": int(args.step),
+        "min_scaffold_len": int(args.min_scaffold_len),
+        "chroms": _pstr(args.chroms),
+        "regions_out": _pstr(args.regions_out),
+        "runtrees": bool(args.runtrees),
+        "transversions": bool(args.transversions),
+        "maxN": float(args.maxN),
+        "minpi": int(args.minpi),
+        "ref": str(args.ref),
+        "astral": _pstr(args.astral),
+        "collapse": float(args.collapse),
+        "model": str(args.model),
+        "bootstrap": int(args.bootstrap),
+        "scf": int(args.scf),
+        "iqtree_threads_per_job": int(args.iqtree_threads_per_job),
+        "jobs": None if args.jobs is None else int(args.jobs),
+        "topofilter": bool(args.topofilter),
+        "topomode": str(args.topomode),
+        "minbs": int(args.minbs),
+    }
+
+
+def check_or_write_manifest(args: argparse.Namespace, runlog: Path) -> None:
+    manifest_path = args.outdir / "phyloslide.run_manifest.json"
+    current = build_run_manifest(args)
+    if manifest_path.exists():
+        try:
+            old = json.loads(manifest_path.read_text())
+        except Exception as e:
+            raise SystemExit(f"ERROR: Could not parse run manifest: {manifest_path}\n{e}")
+        if old != current and not args.force_rebuild:
+            raise SystemExit(
+                "ERROR: Existing outdir contains outputs from a different parameter set.\n"
+                "Refusing mixed-parameter resume.\n"
+                "Use --force_rebuild to overwrite in place, or --restart to clean and rerun."
+            )
+    manifest_path.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n")
+    log(f"Run manifest: {manifest_path}", runlog)
+
+
+def restart_cleanup(outdir: Path, samples: List[Tuple[str, Path]]) -> None:
+    keep_git = outdir / ".git"
+    to_remove: List[Path] = [
+        outdir / "Combined",
+        outdir / "Combined_windows",
+        outdir / "filtering",
+        outdir / "trees",
+        outdir / "phyloslide.log",
+        outdir / "phyloslide_intermediates.tar.gz",
+        outdir / "phyloslide.run_manifest.json",
+    ]
+    for code, _ in samples:
+        to_remove.append(outdir / code)
+
+    for p in to_remove:
+        if p == keep_git:
+            continue
+        if p.is_dir():
+            shutil.rmtree(p, ignore_errors=True)
+        elif p.exists():
+            p.unlink(missing_ok=True)
+
+
+# -----------------------------
 # Preflight checks
 # -----------------------------
 def preflight_checks(args: argparse.Namespace) -> None:
@@ -506,6 +603,14 @@ def preflight_checks(args: argparse.Namespace) -> None:
     # Required inputs
     if not args.input.exists():
         problems.append(f"--input not found: {args.input}")
+    else:
+        try:
+            samples = read_samples_table(args.input)
+            for code, fasta in samples:
+                if not fasta.exists():
+                    problems.append(f"Genome FASTA not found for sample {code}: {fasta}")
+        except Exception as e:
+            problems.append(f"--input parse error: {e}")
     if args.regions is not None and not args.regions.exists():
         problems.append(f"--regions not found: {args.regions}")
 
@@ -788,6 +893,22 @@ def build_argparser() -> argparse.ArgumentParser:
             "Keeps: Combined/, filtering/, trees/reference/, trees/concordance/, trees/all_window_trees.trs"
         ),
     )
+    ap.add_argument(
+        "--restart",
+        action="store_true",
+        help=(
+            "Clean prior PhyloSlide outputs in --outdir and rerun from scratch.\n"
+            "Removes sample window dirs and pipeline output dirs/files."
+        ),
+    )
+    ap.add_argument(
+        "--force_rebuild",
+        action="store_true",
+        help=(
+            "Recompute and overwrite intermediates in-place even if output files already exist.\n"
+            "Also permits rerun when run-manifest parameters differ from previous run in same --outdir."
+        ),
+    )
 
     return ap
 
@@ -807,8 +928,21 @@ def main() -> None:
     # Preflight checks (dependencies + inputs)
     preflight_checks(args)
 
+    # Load samples early (used by restart cleanup + downstream)
+    samples = read_samples_table(args.input)
+    codenames = [c for c, _ in samples]
+
+    if args.restart:
+        # Full cleanup of known outputs in outdir, then force rebuild semantics.
+        restart_cleanup(args.outdir, samples)
+        args.force_rebuild = True
+
     log("Starting PhyloSlide", runlog)
     log(f"Command line: {' '.join(sys.argv)}", runlog)
+    log(f"Mode: restart={args.restart} force_rebuild={args.force_rebuild}", runlog)
+
+    # Prevent accidental mixed-parameter resume unless explicitly allowed.
+    check_or_write_manifest(args, runlog)
 
     # Parallel design
     C = os.cpu_count() or 1
@@ -835,9 +969,7 @@ def main() -> None:
         raise SystemExit("ERROR: No regions file available (provide --regions or use --makewindows).")
 
     # Load inputs
-    samples = read_samples_table(args.input)
     regions = read_regions(args.regions)
-    codenames = [c for c, _ in samples]
 
     log(f"Samples: {len(samples)}", runlog)
     log(f"Regions: {len(regions)}", runlog)
@@ -865,9 +997,10 @@ def main() -> None:
 
         extracted = 0
         padded = 0
+        normalized_len = 0
         for r in regions:
             out_fa = sample_dir / f"{r}.fasta"
-            if out_fa.exists() and out_fa.stat().st_size > 0:
+            if (not args.force_rebuild) and out_fa.exists() and out_fa.stat().st_size > 0:
                 continue
 
             L = region_len(r)
@@ -885,12 +1018,24 @@ def main() -> None:
                 lines = [x for x in seq.splitlines() if x.strip()]
                 if not lines or not lines[0].startswith(">"):
                     raise RuntimeError(f"{code}: seqtk produced invalid output for {r}")
-                header = f"{code}|{r}"
+                header = code
                 seq_str = "".join(lines[1:]).strip()
+                if len(seq_str) != L:
+                    with slog.open("a") as f:
+                        f.write(
+                            f"[{now()}] LENGTH_MISMATCH normalized: {r} "
+                            f"(expected={L}, observed={len(seq_str)})\n"
+                        )
+                    # Normalize to expected window length to keep downstream MSAs consistent.
+                    if len(seq_str) < L:
+                        seq_str = seq_str + ("N" * (L - len(seq_str)))
+                    else:
+                        seq_str = seq_str[:L]
+                    normalized_len += 1
                 fasta_write_one(out_fa, header, seq_str)
                 extracted += 1
             else:
-                header = f"{code}|{r}"
+                header = code
                 fasta_write_one(out_fa, header, "N" * L)
                 padded += 1
                 with slog.open("a") as f:
@@ -901,14 +1046,18 @@ def main() -> None:
 
         # Per-sample concat across ALL regions (not filtered)
         concat = sample_dir / f"{code}_concat.fasta"
-        if not concat.exists() or concat.stat().st_size == 0:
+        if args.force_rebuild or (not concat.exists()) or concat.stat().st_size == 0:
             seq_parts: List[str] = []
             for r in regions:
                 _, s = fasta_read_one(sample_dir / f"{r}.fasta")
                 seq_parts.append(s)
             fasta_write_one(concat, code, "".join(seq_parts))
 
-        log(f"{code}: extracted={extracted} padded_missing={padded}", runlog)
+        log(
+            f"{code}: extracted={extracted} padded_missing={padded} "
+            f"length_normalized={normalized_len}",
+            runlog,
+        )
 
     log("Step 1 complete.", runlog)
 
@@ -962,7 +1111,7 @@ def main() -> None:
     deleted_windows = 0
     for r in kept:
         msa = comb_win_dir / f"{r}.fa"
-        if msa.exists() and msa.stat().st_size > 0:
+        if (not args.force_rebuild) and msa.exists() and msa.stat().st_size > 0:
             # If MSA already exists, we assume previous run may have already deleted windows.
             continue
 
@@ -1068,6 +1217,7 @@ def main() -> None:
                 model=args.model,
                 bootstrap=args.bootstrap,
                 log_path=iqlog,
+                force_rebuild=bool(args.force_rebuild),
             )
         )
 
