@@ -450,7 +450,9 @@ def iqtree_window(job: WindowJob) -> Tuple[str, bool, str]:
       - If .treefile exists and non-empty: skip.
       - Otherwise run IQ-TREE2 with -redo to avoid checkpoint collisions (.ckp.gz).
     """
-    treefile = job.out_prefix.with_suffix(".treefile")
+    # Do not use Path.with_suffix here: region names contain dots (e.g. NC_045595.1),
+    # and with_suffix would truncate the basename incorrectly.
+    treefile = Path(f"{job.out_prefix}.treefile")
     if (not job.force_rebuild) and treefile.exists() and treefile.stat().st_size > 0:
         return (job.region, True, "SKIP(existing treefile)")
 
@@ -1249,7 +1251,7 @@ def main() -> None:
     with all_trs.open("w") as out:
         for r in kept2:
             safe = sanitize_region(r)
-            treefile = (win_tree_dir / safe).with_suffix(".treefile")
+            treefile = Path(f"{win_tree_dir / safe}.treefile")
             out.write(treefile.read_text().strip() + "\n")
 
     # -----------------------------
@@ -1438,7 +1440,7 @@ def main() -> None:
         with topomatch.open("w") as ok, topofail.open("w") as bad:
             for r in kept2:
                 safe = sanitize_region(r)
-                tf = (win_tree_dir / safe).with_suffix(".treefile")
+                tf = Path(f"{win_tree_dir / safe}.treefile")
                 if not tf.exists():
                     bad.write(f"{r}\tmissing_treefile\n")
                     continue
