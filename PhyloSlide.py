@@ -866,7 +866,7 @@ def build_argparser() -> argparse.ArgumentParser:
             "Create a filtered concatenation (dating supermatrix) using only windows that:\n"
             "  - passed missingness and minPI filters\n"
             "  - match the reference topology (unrooted; see --topomode)\n"
-            "  - have minimum internal bootstrap >= --minbs\n"
+            "  - have MEAN internal bootstrap >= --minbs\n"
             "Requires biopython."
         ),
     )
@@ -876,7 +876,18 @@ def build_argparser() -> argparse.ArgumentParser:
         default="exact",
         help="Topology matching: exact (default) or compatible (allows unresolved gene trees).",
     )
-    ap.add_argument("--minbs", type=int, default=90, help="Minimum internal bootstrap for topofilter windows. Default: 90")
+    ap.add_argument(
+        "--minbs",
+        type=int,
+        default=90,
+        help=(
+            "Minimum MEAN internal bootstrap for topofilter windows. Default: 90.\n"
+            "The mean is taken over all internal branches of the window tree.\n"
+            "NOTE: versions before 2026-09 used the MINIMUM internal bootstrap here,\n"
+            "which scales badly with taxon number (requiring every one of N-3 nodes to\n"
+            "clear the threshold) and discarded most windows on datasets with >10 taxa."
+        ),
+    )
 
     # File management
     ap.add_argument(
@@ -1412,7 +1423,7 @@ def main() -> None:
                 return sup
             return support_from_label(getattr(clade, "name", None))
 
-        def min_internal_support(tree) -> Optional[float]:
+        def mean_internal_support(tree) -> Optional[float]:
             Tset = tips(tree)
             n = len(Tset)
             vals = []
@@ -1427,7 +1438,7 @@ def main() -> None:
                 if sup is None:
                     return None
                 vals.append(sup)
-            return min(vals) if vals else None
+            return (sum(vals) / len(vals)) if vals else None
 
         ref = read_tree(ref_tree)
         ref_splits, ref_tips = unrooted_splits(ref)
@@ -1449,12 +1460,12 @@ def main() -> None:
                 if gt_tips != ref_tips:
                     bad.write(f"{r}\ttaxa_mismatch\n")
                     continue
-                mbs = min_internal_support(gt)
+                mbs = mean_internal_support(gt)
                 if mbs is None:
                     bad.write(f"{r}\tmissing_support\n")
                     continue
                 if mbs < args.minbs:
-                    bad.write(f"{r}\tmin_bootstrap<{args.minbs}\tmin={mbs}\n")
+                    bad.write(f"{r}\tmean_bootstrap<{args.minbs}\tmean={mbs:.2f}\n")
                     continue
 
                 if args.topomode == "exact":

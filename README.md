@@ -36,7 +36,7 @@ PhyloSlide is a sliding-window phylogenomics pipeline for extracting genomic win
 Builds a dating supermatrix using only windows that:
 - passed missingness and minPI filters
 - match the reference topology (exact or compatible)
-- have minimum internal bootstrap ≥ `--minbs`
+- have **mean** internal bootstrap ≥ `--minbs`
 
 ---
 
@@ -263,7 +263,12 @@ python3 PhyloSlide.py \
 ```
 
 Options:
-- `--minbs` default 90
+- `--minbs` default 90 — applied to the **mean** internal bootstrap of the
+  window tree, averaged over all internal branches.
+  (Before 2026-09 this was the *minimum* internal bootstrap. That required
+  every one of the N-3 internal nodes to clear the threshold, which gets
+  steadily harsher as taxa are added and discarded most windows on datasets
+  with more than ~10 taxa.)
 - `--topomode exact` (default)
 - `--topomode compatible`
 
