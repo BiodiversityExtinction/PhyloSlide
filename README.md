@@ -35,8 +35,14 @@ PhyloSlide is a sliding-window phylogenomics pipeline for extracting genomic win
 
 Builds a dating supermatrix using only windows that:
 - passed missingness and minPI filters
-- match the reference topology (exact or compatible)
+- are within `--maxrf` Robinson-Foulds distance of the reference topology
+- are clock-like: root-to-tip coefficient of variation ≤ `--maxcov`
 - have **mean** internal bootstrap ≥ `--minbs`
+
+Columns that are `N` in every taxon are dropped from the dating supermatrix
+(they carry no information and upset PAML/baseml). The per-window filters are
+per-sample and never inspect individual alignment columns, so this is the only
+place columns are removed.
 
 ---
 
@@ -263,18 +269,45 @@ python3 PhyloSlide.py \
 ```
 
 Options:
+
+- `--maxrf` default **2** — maximum Robinson-Foulds distance between a window
+  tree and the reference tree.
+  - `0` = **exact match**: every bipartition identical to the reference.
+  - `2` = one bipartition may differ, i.e. one NNI move from the reference.
+  - RF counts differing bipartitions in *both* directions, so for two fully
+    resolved trees over the same taxa it is always **even**. `--maxrf 1` behaves
+    identically to `--maxrf 0`, and `--maxrf 3` identically to `--maxrf 2`.
+
+  Exact matching is strict: on an 18-taxon dataset only ~13% of windows matched
+  exactly, while ~42% were within one NNI move.
+
+- `--maxcov` default **0.1** — maximum coefficient of variation in root-to-tip
+  length ("non-clocklikeness") of the window tree, after midpoint rooting.
+  A strict molecular clock gives 0; larger values mean more rate variation among
+  lineages. Windows with erratic rates distort the relaxed-clock model used for
+  dating. Set to a large number (e.g. `--maxcov 999`) to disable.
+
 - `--minbs` default 90 — applied to the **mean** internal bootstrap of the
   window tree, averaged over all internal branches.
   (Before 2026-09 this was the *minimum* internal bootstrap. That required
   every one of the N-3 internal nodes to clear the threshold, which gets
   steadily harsher as taxa are added and discarded most windows on datasets
   with more than ~10 taxa.)
-- `--topomode exact` (default)
-- `--topomode compatible`
 
-Outputs:
-- Filtered region list
-- Dating supermatrix alignment
+- `--topomode` — **deprecated**, kept for backwards compatibility.
+  `--topomode exact` is equivalent to `--maxrf 0`; `--topomode compatible`
+  ignores `--maxrf` and tests whether the window splits are a subset of the
+  reference splits. Prefer `--maxrf`.
+
+Defaults follow published practice for window-based dating (RF ≤ 2 and
+root-to-tip CoV < 0.1).
+
+Outputs (in `filtering/` and `Combined/`, tagged with the filter settings):
+- `regions.topomatch.rf{R}.cov{C}.minbs{B}.{full|tv}.txt` — windows kept
+- `regions.topofail.rf{R}.cov{C}.minbs{B}.{full|tv}.txt` — windows dropped, with reason
+- `window_tree_stats.{full|tv}.tsv` — per-window `rf`, `rtt_cov`, `mean_bs` for
+  **every** window, so thresholds can be re-chosen without rerunning anything
+- `All_concat.topomatch.rf{R}.cov{C}.minbs{B}.{full|tv}.fasta` — dating supermatrix
 
 ---
 

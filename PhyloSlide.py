@@ -67,7 +67,9 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as cf
+import copy
 import json
+import math
 import os
 import re
 import shutil
@@ -551,6 +553,8 @@ def build_run_manifest(args: argparse.Namespace) -> Dict[str, object]:
         "jobs": None if args.jobs is None else int(args.jobs),
         "topofilter": bool(args.topofilter),
         "topomode": str(args.topomode),
+        "maxrf": int(args.maxrf),
+        "maxcov": float(args.maxcov),
         "minbs": int(args.minbs),
     }
 
@@ -670,6 +674,10 @@ def preflight_checks(args: argparse.Namespace) -> None:
         problems.append("--jobs must be > 0")
     if args.minbs < 0:
         problems.append("--minbs must be >= 0")
+    if args.maxrf < 0:
+        problems.append("--maxrf must be >= 0")
+    if args.maxcov < 0:
+        problems.append("--maxcov must be >= 0")
     if args.collapse < 0:
         problems.append("--collapse must be >= 0")
 
@@ -871,10 +879,38 @@ def build_argparser() -> argparse.ArgumentParser:
         ),
     )
     ap.add_argument(
+        "--maxrf",
+        type=int,
+        default=2,
+        help=(
+            "Maximum Robinson-Foulds distance between a window tree and the reference\n"
+            "tree for that window to enter the dating supermatrix. Default: 2.\n"
+            "  0 = exact topology match (every bipartition identical)\n"
+            "  2 = one bipartition may differ (one NNI move from the reference)\n"
+            "RF counts differing bipartitions in BOTH directions, so it is always even\n"
+            "for two fully resolved trees over the same taxa."
+        ),
+    )
+    ap.add_argument(
+        "--maxcov",
+        type=float,
+        default=0.1,
+        help=(
+            "Maximum coefficient of variation in root-to-tip length (non-clocklikeness)\n"
+            "of a window tree, after midpoint rooting. Default: 0.1.\n"
+            "0 would be a perfect molecular clock; higher values mean more rate variation\n"
+            "among lineages. Set to a large number to disable."
+        ),
+    )
+    ap.add_argument(
         "--topomode",
         choices=["exact", "compatible"],
-        default="exact",
-        help="Topology matching: exact (default) or compatible (allows unresolved gene trees).",
+        default=None,
+        help=(
+            "DEPRECATED, kept for backwards compatibility. Use --maxrf instead.\n"
+            "--topomode exact is equivalent to --maxrf 0. --topomode compatible keeps\n"
+            "windows whose splits are a subset of the reference splits."
+        ),
     )
     ap.add_argument(
         "--minbs",
@@ -1423,6 +1459,28 @@ def main() -> None:
                 return sup
             return support_from_label(getattr(clade, "name", None))
 
+        def rtt_cov(tree) -> Optional[float]:
+            """Coefficient of variation in root-to-tip length (non-clocklikeness).
+
+            Midpoint-roots a copy of the tree, measures the root-to-tip distance for
+            every leaf, and returns sd/mean.  A strict clock gives 0.  Uses the n-1
+            denominator so the value matches R's sd(), as used by the published
+            rtt.cov() implementations.
+            """
+            t2 = copy.deepcopy(tree)
+            try:
+                t2.root_at_midpoint()
+            except Exception:
+                return None
+            d = [t2.distance(t2.root, leaf) for leaf in t2.get_terminals()]
+            if len(d) < 2:
+                return None
+            m = sum(d) / len(d)
+            if m <= 0:
+                return None
+            var = sum((x - m) ** 2 for x in d) / (len(d) - 1)
+            return math.sqrt(var) / m
+
         def mean_internal_support(tree) -> Optional[float]:
             Tset = tips(tree)
             n = len(Tset)
@@ -1444,11 +1502,26 @@ def main() -> None:
         ref_splits, ref_tips = unrooted_splits(ref)
 
         suffix = "tv" if args.transversions else "full"
-        topomatch = filtering_dir / f"regions.topomatch.minbs{args.minbs}.{suffix}.txt"
-        topofail = filtering_dir / f"regions.topofail.minbs{args.minbs}.{suffix}.txt"
+
+        # --topomode is deprecated; honour it if the user set it explicitly.
+        max_rf = args.maxrf
+        if args.topomode == "exact":
+            max_rf = 0
+            log("WARNING: --topomode exact is deprecated; treating as --maxrf 0.", runlog)
+        elif args.topomode == "compatible":
+            log("WARNING: --topomode compatible is deprecated; --maxrf is ignored "
+                "and gene trees are tested as a subset of the reference splits.", runlog)
+
+        tag = f"rf{max_rf}.cov{args.maxcov}.minbs{args.minbs}.{suffix}"
+        topomatch = filtering_dir / f"regions.topomatch.{tag}.txt"
+        topofail = filtering_dir / f"regions.topofail.{tag}.txt"
+        statfile = filtering_dir / f"window_tree_stats.{suffix}.tsv"
+        log(f"Topology filter: RF <= {max_rf}, rtt_cov <= {args.maxcov}, "
+            f"mean bootstrap >= {args.minbs}", runlog)
 
         kept_topo: List[str] = []
-        with topomatch.open("w") as ok, topofail.open("w") as bad:
+        with topomatch.open("w") as ok, topofail.open("w") as bad, statfile.open("w") as stat:
+            stat.write("region\trf\trtt_cov\tmean_bs\n")
             for r in kept2:
                 safe = sanitize_region(r)
                 tf = Path(f"{win_tree_dir / safe}.treefile")
@@ -1464,26 +1537,55 @@ def main() -> None:
                 if mbs is None:
                     bad.write(f"{r}\tmissing_support\n")
                     continue
+
+                # Robinson-Foulds distance: bipartitions differing in either direction.
+                rf = len(ref_splits - gt_splits) + len(gt_splits - ref_splits)
+                cov = rtt_cov(gt)
+                stat.write(f"{r}\t{rf}\t{'' if cov is None else f'{cov:.6f}'}\t{mbs:.2f}\n")
+
                 if mbs < args.minbs:
                     bad.write(f"{r}\tmean_bootstrap<{args.minbs}\tmean={mbs:.2f}\n")
                     continue
 
-                if args.topomode == "exact":
-                    ok_topo = (gt_splits == ref_splits)
-                else:
+                if args.topomode == "compatible":
                     ok_topo = gt_splits.issubset(ref_splits)
-
-                if ok_topo:
-                    ok.write(r + "\n")
-                    kept_topo.append(r)
                 else:
-                    bad.write(f"{r}\ttopology_mismatch\n")
+                    ok_topo = (rf <= max_rf)
+                if not ok_topo:
+                    bad.write(f"{r}\tRF>{max_rf}\trf={rf}\n")
+                    continue
+
+                if cov is None:
+                    bad.write(f"{r}\trtt_cov_undefined\n")
+                    continue
+                if cov > args.maxcov:
+                    bad.write(f"{r}\trtt_cov>{args.maxcov}\tcov={cov:.4f}\n")
+                    continue
+
+                ok.write(r + "\n")
+                kept_topo.append(r)
 
         if not kept_topo:
             raise SystemExit("ERROR: No windows passed topology+minBS filter.")
 
-        dating = comb_dir / f"All_concat.topomatch.minbs{args.minbs}.{suffix}.fasta"
+        dating = comb_dir / f"All_concat.topomatch.{tag}.fasta"
         log(f"Writing dating supermatrix: {dating}", runlog)
+
+        # Columns that are N in EVERY taxon carry no information and upset some
+        # downstream tools (notably PAML/baseml), so drop them.  The window
+        # filters above are per-window and per-sample, and never inspect columns.
+        keep_masks: Dict[str, List[bool]] = {}
+        n_before = n_allN = 0
+        for r in kept_topo:
+            names, seqs = read_msa_fasta(comb_win_dir / f"{r}.fa")
+            L = len(seqs[0]) if seqs else 0
+            mask = [any(sq[i].upper() != "N" for sq in seqs) for i in range(L)]
+            keep_masks[r] = mask
+            n_before += L
+            n_allN += L - sum(mask)
+        log(f"All-N columns removed from dating supermatrix: {n_allN} / {n_before} "
+            f"({100.0 * n_allN / n_before if n_before else 0:.3f}%); "
+            f"retained {n_before - n_allN} sites", runlog)
 
         with dating.open("w") as out:
             for code in codenames:
@@ -1491,7 +1593,8 @@ def main() -> None:
                 for r in kept_topo:
                     msa = comb_win_dir / f"{r}.fa"
                     seq = get_taxon_seq_from_msa(msa, code)
-                    out.write(seq + "\n")
+                    mask = keep_masks[r]
+                    out.write("".join(c for c, k in zip(seq, mask) if k) + "\n")
                 out.write("\n")
 
     # -----------------------------
