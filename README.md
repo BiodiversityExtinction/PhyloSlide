@@ -275,8 +275,9 @@ Options:
   - `0` = **exact match**: every bipartition identical to the reference.
   - `2` = one bipartition may differ, i.e. one NNI move from the reference.
   - RF counts differing bipartitions in *both* directions, so for two fully
-    resolved trees over the same taxa it is always **even**. `--maxrf 1` behaves
-    identically to `--maxrf 0`, and `--maxrf 3` identically to `--maxrf 2`.
+    resolved trees over the same taxa it is always **even**. Odd values are
+    rejected at startup, since they would silently behave like the next value
+    down.
 
   Exact matching is strict: on an 18-taxon dataset only ~13% of windows matched
   exactly, while ~42% were within one NNI move.

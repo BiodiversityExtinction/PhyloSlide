@@ -678,6 +678,14 @@ def preflight_checks(args: argparse.Namespace) -> None:
         problems.append("--minbs must be >= 0")
     if args.maxrf < 0:
         problems.append("--maxrf must be >= 0")
+    elif args.maxrf % 2 != 0:
+        problems.append(
+            f"--maxrf must be an even number (got {args.maxrf}). The Robinson-Foulds "
+            "distance counts bipartitions that differ in BOTH directions, so between "
+            "two fully resolved trees over the same taxa it is always even; an odd "
+            f"threshold behaves identically to {args.maxrf - 1}. Use 0 for an exact "
+            "topology match, or 2 to allow one differing bipartition (one NNI move)."
+        )
     if args.maxcov < 0:
         problems.append("--maxcov must be >= 0")
     if args.collapse < 0:
