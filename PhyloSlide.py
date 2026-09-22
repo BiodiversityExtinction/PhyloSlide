@@ -557,6 +557,8 @@ def build_run_manifest(args: argparse.Namespace) -> Dict[str, object]:
         "maxcov": float(args.maxcov),
         "dating_phylip": bool(args.dating_phylip),
         "dating_partition": str(args.dating_partition),
+        "dating_template": bool(args.dating_template),
+        "dating_outgroup": None if args.dating_outgroup is None else str(args.dating_outgroup),
         "minbs": int(args.minbs),
     }
 
@@ -676,6 +678,8 @@ def preflight_checks(args: argparse.Namespace) -> None:
         problems.append("--jobs must be > 0")
     if args.minbs < 0:
         problems.append("--minbs must be >= 0")
+    if args.dating_template and not args.dating_outgroup:
+        problems.append("--dating_template requires --dating_outgroup (MCMCtree needs a rooted tree)")
     if args.maxrf < 0:
         problems.append("--maxrf must be >= 0")
     elif args.maxrf % 2 != 0:
@@ -921,6 +925,24 @@ def build_argparser() -> argparse.ArgumentParser:
             "--topomode exact is equivalent to --maxrf 0. --topomode compatible keeps\n"
             "windows whose splits are a subset of the reference splits."
         ),
+    )
+    ap.add_argument(
+        "--dating_template",
+        action="store_true",
+        help=(
+            "Write a MCMCtree starter kit next to the dating supermatrix:\n"
+            "  dating_template/node_key.txt        every internal node, in plain English\n"
+            "  dating_template/tree.template.nwk   rooted tree with @N1@.. placeholders\n"
+            "  dating_template/calibrations.txt    blank file for you to fill in\n"
+            "  dating_template/mcmctree.ctl        control file with ndata pre-filled\n"
+            "Fill in calibrations.txt, then run prepare_mcmctree.py on the directory.\n"
+            "Requires --dating_outgroup (MCMCtree needs a rooted tree)."
+        ),
+    )
+    ap.add_argument(
+        "--dating_outgroup",
+        default=None,
+        help="Taxon (CODENAME) to root the dating template tree on. Required by --dating_template.",
     )
     ap.add_argument(
         "--dating_phylip",
@@ -1675,6 +1697,140 @@ def main() -> None:
                 log(f"  partition {bname}: {len(regs)} windows, {L} sites", runlog)
             log(f"PHYLIP blocks: {len(blocks)}  ->  set ndata = {len(blocks)} "
                 f"in the MCMCtree control file", runlog)
+
+        # -----------------------------
+        # Optional MCMCtree starter kit
+        # -----------------------------
+        if args.dating_template:
+            ndata_hint = len(blocks) if want_phylip else 1
+            tdir = comb_dir / "dating_template"
+            tdir.mkdir(parents=True, exist_ok=True)
+            log(f"Writing MCMCtree starter kit: {tdir}", runlog)
+
+            tt = read_tree(ref_tree)
+            for c in tt.find_clades():
+                c.confidence = None
+                c.branch_length = None
+                if not c.is_terminal():
+                    c.name = None
+            names = {x.name for x in tt.get_terminals()}
+            if args.dating_outgroup not in names:
+                raise SystemExit(
+                    f"ERROR: --dating_outgroup '{args.dating_outgroup}' is not a taxon in the "
+                    f"reference tree. Available: {', '.join(sorted(names))}"
+                )
+            tt.root_with_outgroup(args.dating_outgroup)
+
+            internal = list(tt.get_nonterminals())
+            for i, c in enumerate(internal, 1):
+                c.name = f"@N{i}@"
+
+            buf = StringIO()
+            Phylo.write(tt, buf, "newick", plain=False)
+            nwk = re.sub(r":0\.?0*(?=[,)])", "", buf.getvalue().strip().rstrip(";"))
+            nwk = re.sub(r":0\.?0*$", "", nwk)
+            ntax = len(tt.get_terminals())
+            (tdir / "tree.template.nwk").write_text(f"{ntax} 1\n{nwk};\n")
+
+            # node key, in plain English
+            lines = [
+                "PhyloSlide -> MCMCtree node key",
+                "=" * 60,
+                f"Tree rooted on : {args.dating_outgroup}",
+                f"Taxa           : {ntax}",
+                f"Internal nodes : {len(internal)}",
+                "",
+                "Put calibrations on the nodes you have fossils for -- usually just one",
+                "or a few, NOT every node. MCMCtree spreads absolute time outward from",
+                "the calibrated nodes to all the others.",
+                "",
+                "TIME UNIT IS 100 Myr:   17.2 Ma -> 0.172     3.6 Ma -> 0.036",
+                "",
+                "-" * 60,
+            ]
+            for i, c in enumerate(internal, 1):
+                tips = sorted(x.name for x in c.get_terminals())
+                if len(tips) == ntax:
+                    desc = "THE ROOT - all taxa"
+                elif len(tips) == ntax - 1:
+                    desc = f"all taxa except {sorted(names - set(tips))[0]}"
+                else:
+                    desc = f"{len(tips)} taxa"
+                lines.append(f"N{i}  ({desc})")
+                wrapped, cur = [], "      "
+                for t_ in tips:
+                    if len(cur) + len(t_) + 2 > 74:
+                        wrapped.append(cur); cur = "      "
+                    cur += t_ + ", "
+                wrapped.append(cur.rstrip(", "))
+                lines.extend(wrapped)
+                lines.append("")
+            (tdir / "node_key.txt").write_text("\n".join(lines) + "\n")
+
+            (tdir / "calibrations.txt").write_text(
+                "# PhyloSlide -> MCMCtree calibrations\n"
+                "#\n"
+                "# One line per calibrated node:    <NODE>   <calibration>\n"
+                "# Node names (N1, N2, ...) are listed in node_key.txt\n"
+                "#\n"
+                "# TIME UNIT IS 100 Myr:   17.2 Ma -> 0.172     3.6 Ma -> 0.036\n"
+                "#\n"
+                "# Calibration types:\n"
+                "#   L(lo)               minimum age only - the usual choice for a fossil,\n"
+                "#                       which tells you a lineage existed BY some date\n"
+                "#                       but says nothing about how much older it is\n"
+                "#   U(hi)               maximum age only\n"
+                "#   B(lo, hi)           bounded both sides, soft tails (2.5% each by default)\n"
+                "#   B(lo, hi, pL, pU)   bounded, explicit tail probabilities;\n"
+                "#                       pL=1e-300 makes the minimum effectively hard\n"
+                "#   G(alpha, beta)      gamma prior\n"
+                "#\n"
+                "# You need at least one calibration, and the analysis needs the ROOT\n"
+                "# constrained either here or via RootAge in mcmctree.ctl.\n"
+                "#\n"
+                "# Put each fossil on the node it actually diagnoses. A STEM fossil of a\n"
+                "# group dates that group's split from its sister lineage, NOT the crown\n"
+                "# node of the group -- getting this wrong shifts every date in the tree.\n"
+                "#\n"
+                "# Examples (delete these and add your own):\n"
+                "#   N1    B(0.172, 0.195, 1e-300, 0.025)\n"
+                "#   N12   L(0.03)\n"
+            )
+
+            (tdir / "mcmctree.ctl").write_text(
+                f"""          seed = -1
+       seqfile = {phy.name if want_phylip else '<convert the dating FASTA to PHYLIP>'}
+      treefile = tree.nwk
+       outfile = out_dates.txt
+
+         ndata = {ndata_hint}
+       seqtype = 0          * 0: nucleotides
+       usedata = 3          * run 1: usedata=3 writes out.BV (baseml Hessian)
+                            * run 2: mv out.BV in.BV, set usedata=2 (approx. lik. MCMC)
+         clock = 2          * 1: strict  2: uncorrelated  3: autocorrelated
+       RootAge = '<1.0'     * used ONLY if the root carries no calibration
+
+         model = 7          * 7: GTR
+         alpha = 0.5
+         ncatG = 6
+     cleandata = 0
+
+       BDparas = 1 1 0
+   kappa_gamma = 6 2
+   alpha_gamma = 1 1
+   rgene_gamma = 2 20 1
+  sigma2_gamma = 1 10 1
+
+         print = 1
+        burnin = 1000000
+      sampfreq = 1000
+       nsample = 10000      * total sampled steps = sampfreq x nsample
+"""
+            )
+            log(f"  node_key.txt, tree.template.nwk, calibrations.txt, mcmctree.ctl "
+                f"(ndata={ndata_hint})", runlog)
+            log("  Next: edit calibrations.txt, then run prepare_mcmctree.py on that directory.",
+                runlog)
 
     # -----------------------------
     # Optional archiving (tar.gz) for many-small-files directories

@@ -336,6 +336,60 @@ than from additional data, and the effect is largest on exactly the nodes that
 carry no calibration. Prefer `none` unless the unpartitioned uncertainty is
 genuinely unusable, and say which you used in your methods.
 
+### MCMCtree starter kit
+
+```
+--dating_template --dating_outgroup CODENAME
+```
+
+Fossil calibrations are the one part of dating PhyloSlide cannot supply: they
+depend on your taxa, your fossils, and a palaeontological judgement about which
+node each fossil diagnoses. What PhyloSlide *can* do is remove the fiddly
+mechanics around them. `--dating_template` writes:
+
+```
+Combined/dating_template/
+    node_key.txt        every internal node, with its taxa spelled out
+    tree.template.nwk   rooted tree with @N1@.. placeholders
+    calibrations.txt    for you to fill in
+    mcmctree.ctl        control file with ndata already matching the PHYLIP
+```
+
+Open `node_key.txt`, find the node you have a fossil for, and add one line per
+calibration to `calibrations.txt`:
+
+```
+N1    B(0.172, 0.195, 1e-300, 0.025)
+N13   L(0.03)
+```
+
+Then run the companion script, which substitutes them into the tree, strips the
+unused placeholders, and writes both control files:
+
+```
+python3 prepare_mcmctree.py Combined/dating_template
+```
+
+It echoes back the taxa in every clade you calibrated, because **node numbers are
+specific to one tree** and mean something different in any other analysis. Check
+that echo before running anything.
+
+Calibration syntax (times in units of **100 Myr**, so 17.2 Ma is `0.172`):
+
+| Form | Meaning |
+|---|---|
+| `L(lo)` | minimum age only — the usual choice for a fossil |
+| `U(hi)` | maximum age only |
+| `B(lo, hi)` | bounded both sides, soft tails |
+| `B(lo, hi, pL, pU)` | bounded, explicit tail probabilities; `pL=1e-300` = hard minimum |
+| `G(alpha, beta)` | gamma prior |
+
+You need at least one calibration, and the root must be constrained either by a
+calibration or by `RootAge` in the control file. Put each fossil on the node it
+actually diagnoses: a **stem** fossil of a group dates that group's split from
+its sister lineage, not the group's crown node. Getting that wrong shifts every
+date in the tree.
+
 MCMCtree then runs in two passes (see the PAML documentation):
 
 1. `usedata = 3` — `baseml` estimates branch lengths plus the gradient and
