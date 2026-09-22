@@ -555,6 +555,8 @@ def build_run_manifest(args: argparse.Namespace) -> Dict[str, object]:
         "topomode": str(args.topomode),
         "maxrf": int(args.maxrf),
         "maxcov": float(args.maxcov),
+        "dating_phylip": bool(args.dating_phylip),
+        "dating_partition": str(args.dating_partition),
         "minbs": int(args.minbs),
     }
 
@@ -910,6 +912,30 @@ def build_argparser() -> argparse.ArgumentParser:
             "DEPRECATED, kept for backwards compatibility. Use --maxrf instead.\n"
             "--topomode exact is equivalent to --maxrf 0. --topomode compatible keeps\n"
             "windows whose splits are a subset of the reference splits."
+        ),
+    )
+    ap.add_argument(
+        "--dating_phylip",
+        action="store_true",
+        help=(
+            "Also write the dating supermatrix in sequential PHYLIP format, as read by\n"
+            "PAML/MCMCtree and BASEML. Implied by --dating_partition chrom."
+        ),
+    )
+    ap.add_argument(
+        "--dating_partition",
+        choices=["none", "chrom"],
+        default="none",
+        help=(
+            "Layout of the PHYLIP dating supermatrix. Default: none.\n"
+            "  none  = one alignment block (MCMCtree ndata = 1)\n"
+            "  chrom = one block per chromosome/scaffold, in the order they first\n"
+            "          appear in the regions file (MCMCtree ndata = number of blocks,\n"
+            "          reported in the log)\n"
+            "Only affects the PHYLIP output; FASTA cannot represent partitions.\n"
+            "NOTE: per-partition rates narrow the posterior on node ages considerably.\n"
+            "That is a modelling choice, not extra information -- prefer 'none' unless\n"
+            "the unpartitioned uncertainty is genuinely unusable."
         ),
     )
     ap.add_argument(
@@ -1587,15 +1613,60 @@ def main() -> None:
             f"({100.0 * n_allN / n_before if n_before else 0:.3f}%); "
             f"retained {n_before - n_allN} sites", runlog)
 
+        def masked_seq(region: str, code: str) -> str:
+            seq = get_taxon_seq_from_msa(comb_win_dir / f"{region}.fa", code)
+            return "".join(c for c, k in zip(seq, keep_masks[region]) if k)
+
         with dating.open("w") as out:
             for code in codenames:
                 out.write(f">{code}\n")
                 for r in kept_topo:
-                    msa = comb_win_dir / f"{r}.fa"
-                    seq = get_taxon_seq_from_msa(msa, code)
-                    mask = keep_masks[r]
-                    out.write("".join(c for c, k in zip(seq, mask) if k) + "\n")
+                    out.write(masked_seq(r, code) + "\n")
                 out.write("\n")
+
+        # -----------------------------
+        # Optional PHYLIP output for PAML / MCMCtree
+        # -----------------------------
+        want_phylip = bool(args.dating_phylip) or args.dating_partition != "none"
+        if want_phylip and not args.dating_phylip:
+            log("--dating_partition implies --dating_phylip; writing PHYLIP.", runlog)
+
+        if want_phylip:
+            if args.dating_partition == "chrom":
+                order: List[str] = []
+                groups: Dict[str, List[str]] = {}
+                for r in kept_topo:
+                    c = r.split(":")[0]
+                    if c not in groups:
+                        groups[c] = []
+                        order.append(c)
+                    groups[c].append(r)
+                pairs = [(c, groups[c]) for c in order]
+            else:
+                pairs = [("ALL", list(kept_topo))]
+
+            lens = [sum(sum(keep_masks[r]) for r in regs) for _, regs in pairs]
+            blocks = [(bn, regs, L) for (bn, regs), L in zip(pairs, lens) if L > 0]
+
+            phy_tag = "" if args.dating_partition == "none" else f".chrom{len(blocks)}"
+            phy = comb_dir / f"All_concat.topomatch.{tag}{phy_tag}.phy"
+            log(f"Writing PHYLIP dating supermatrix: {phy}", runlog)
+
+            with phy.open("w") as out:
+                for bname, regs, L in blocks:
+                    out.write(f"  {len(codenames)}  {L}\n")
+                    for code in codenames:
+                        # two spaces separate name from sequence in PAML's reader
+                        out.write(f"{code}  ")
+                        for r in regs:
+                            out.write(masked_seq(r, code))
+                        out.write("\n")
+                    out.write("\n")
+
+            for bname, regs, L in blocks:
+                log(f"  partition {bname}: {len(regs)} windows, {L} sites", runlog)
+            log(f"PHYLIP blocks: {len(blocks)}  ->  set ndata = {len(blocks)} "
+                f"in the MCMCtree control file", runlog)
 
     # -----------------------------
     # Optional archiving (tar.gz) for many-small-files directories

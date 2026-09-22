@@ -308,6 +308,42 @@ Outputs (in `filtering/` and `Combined/`, tagged with the filter settings):
 - `window_tree_stats.{full|tv}.tsv` — per-window `rf`, `rtt_cov`, `mean_bs` for
   **every** window, so thresholds can be re-chosen without rerunning anything
 - `All_concat.topomatch.rf{R}.cov{C}.minbs{B}.{full|tv}.fasta` — dating supermatrix
+- `All_concat.topomatch.rf{R}.cov{C}.minbs{B}.{full|tv}.phy` — same, PHYLIP
+  (with `--dating_phylip`)
+- `All_concat.topomatch.rf{R}.cov{C}.minbs{B}.{full|tv}.chrom{N}.phy` — PHYLIP with
+  one block per chromosome (with `--dating_partition chrom`)
+
+### PAML / MCMCtree output
+
+```
+--dating_phylip                  also write sequential PHYLIP
+--dating_partition {none,chrom}  PHYLIP layout (default: none)
+```
+
+`--dating_phylip` writes the supermatrix in the sequential PHYLIP format read by
+PAML's `baseml` and `mcmctree`, so no external conversion step is needed.
+
+`--dating_partition` controls the layout and is implied by `chrom`:
+
+- `none` — one alignment block. Use `ndata = 1` in the MCMCtree control file.
+- `chrom` — one block per chromosome/scaffold, ordered by first appearance in the
+  regions file. The number of blocks is written to the log; use it as `ndata`.
+
+Partitioning is **opt-in on purpose**. Per-partition rate parameters noticeably
+narrow the posterior on node ages, but that narrowing comes from the model rather
+than from additional data, and the effect is largest on exactly the nodes that
+carry no calibration. Prefer `none` unless the unpartitioned uncertainty is
+genuinely unusable, and say which you used in your methods.
+
+MCMCtree then runs in two passes (see the PAML documentation):
+
+1. `usedata = 3` — `baseml` estimates branch lengths plus the gradient and
+   Hessian, writing `out.BV`. Cost scales with the number of partitions.
+2. `mv out.BV in.BV`, set `usedata = 2` — approximate-likelihood MCMC.
+
+`mcmctree` invokes `baseml` through a shell call, so **`baseml` must be on
+`PATH`**. If it is not, every locus fails with `file rst2 not found!`, `mcmctree`
+still exits 0, and `out.BV` is written but invalid. Check the log before step 2.
 
 ---
 
