@@ -1843,7 +1843,7 @@ def main() -> None:
          ncatG = 6
      cleandata = 0
 
-       BDparas = 1 1 0
+       BDparas = 1 1 0 C    * PAML >= 4.10.7 requires the 4th field: C conditional, M multiplicative
    kappa_gamma = 6 2
    alpha_gamma = 1 1
    rgene_gamma = 2 20 1
