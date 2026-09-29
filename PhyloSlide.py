@@ -106,6 +106,29 @@ def which_or_die(exe: str, problems: List[str]) -> None:
         problems.append(f"Missing external dependency in PATH: {exe}")
 
 
+# IQ-TREE ships as "iqtree2" in the 2.x series but as "iqtree" in 1.x and again in 3.x, so the
+# binary name cannot be hardcoded. Prefer an explicit --iqtree, then iqtree2, then iqtree.
+IQTREE_CANDIDATES = ("iqtree2", "iqtree")
+IQTREE_BIN: Optional[str] = None
+
+
+def resolve_iqtree(explicit: Optional[str], problems: List[str]) -> Optional[str]:
+    if explicit:
+        if which(explicit) is None and not Path(explicit).exists():
+            problems.append(f"--iqtree not found: {explicit}")
+            return None
+        return explicit
+    for cand in IQTREE_CANDIDATES:
+        if which(cand) is not None:
+            return cand
+    problems.append(
+        "Missing external dependency in PATH: no IQ-TREE binary found (looked for "
+        + ", ".join(IQTREE_CANDIDATES)
+        + "). Install IQ-TREE or pass --iqtree /path/to/binary."
+    )
+    return None
+
+
 def run_cmd(cmd: List[str], logfile: Path, cwd: Optional[Path] = None) -> None:
     logfile.parent.mkdir(parents=True, exist_ok=True)
     with logfile.open("a") as f:
@@ -439,6 +462,7 @@ class WindowJob:
     region: str
     msa_path: Path
     out_prefix: Path
+    iqtree_bin: str
     iqtree_threads: int
     model: str
     bootstrap: int
@@ -459,7 +483,7 @@ def iqtree_window(job: WindowJob) -> Tuple[str, bool, str]:
         return (job.region, True, "SKIP(existing treefile)")
 
     cmd = [
-        "iqtree2",
+        job.iqtree_bin,
         "-s", str(job.msa_path),
         "-m", job.model,
         "-bb", str(job.bootstrap),
@@ -645,7 +669,8 @@ def preflight_checks(args: argparse.Namespace) -> None:
         which_or_die("bedtools", problems)
 
     if args.runtrees:
-        which_or_die("iqtree2", problems)
+        global IQTREE_BIN
+        IQTREE_BIN = resolve_iqtree(args.iqtree, problems)
 
     if args.ref == "astral":
         which_or_die("java", problems)
@@ -864,6 +889,8 @@ def build_argparser() -> argparse.ArgumentParser:
     # IQ-TREE parameters
     ap.add_argument("--model", default="GTR+R6", help="IQ-TREE model for window trees and concat reference. Default: GTR+R6")
     ap.add_argument("--bootstrap", type=int, default=1000, help="IQ-TREE ultrafast bootstraps (-bb). Default: 1000")
+    ap.add_argument("--iqtree", type=str, default=None,
+                    help="IQ-TREE binary to use. Default: auto-detect (iqtree2, then iqtree).")
     ap.add_argument("--scf", type=int, default=100, help="IQ-TREE site concordance factor reps (--scf). Default: 100")
 
     # Parallelism
@@ -1318,6 +1345,7 @@ def main() -> None:
                 region=r,
                 msa_path=msa,
                 out_prefix=out_prefix,
+                iqtree_bin=IQTREE_BIN,
                 iqtree_threads=T,
                 model=args.model,
                 bootstrap=args.bootstrap,
@@ -1369,7 +1397,7 @@ def main() -> None:
         ref_threads = max(1, min(C, 10))
         run_cmd(
             [
-                "iqtree2",
+                IQTREE_BIN,
                 "-s", str(all_concat),
                 "-m", args.model,
                 "-bb", str(args.bootstrap),
@@ -1452,7 +1480,7 @@ def main() -> None:
     cf_threads = max(1, min(C, 10))
     run_cmd(
         [
-            "iqtree2",
+            IQTREE_BIN,
             "-t", str(ref_tree),
             "--gcf", str(all_trs),
             "-s", str(all_concat),
