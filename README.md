@@ -621,7 +621,9 @@ Always required:
 
 If using:
 - `--makewindows` → bedtools
-- `--runtrees` → iqtree
+- `--runtrees` → iqtree. The binary is auto-detected as `iqtree2` then `iqtree`, since the
+  2.x series installs under the former and 1.x and 3.x under the latter. Use `--iqtree` to
+  point at a specific build.
 - `--ref astral` → java + astral-tree
 - `--topofilter`, `--dating_template` or `--ref astral` → biopython
 
