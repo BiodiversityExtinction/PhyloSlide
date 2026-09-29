@@ -1827,7 +1827,7 @@ def main() -> None:
 
             (tdir / "mcmctree.ctl").write_text(
                 f"""          seed = -1
-       seqfile = {phy.name if want_phylip else '<convert the dating FASTA to PHYLIP>'}
+       seqfile = {'../' + phy.name if want_phylip else '<convert the dating FASTA to PHYLIP>'}
       treefile = tree.nwk
        outfile = out_dates.txt
 
