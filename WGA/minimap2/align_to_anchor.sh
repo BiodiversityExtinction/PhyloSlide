@@ -6,10 +6,10 @@
 # LAST and under a completely different aligner, that is a strong statement for the paper. LAST
 # stays the primary (it is the standard for this, and matches the rhino-paper method).
 #
-# Depends on 03_align_to_anchor.sh stage 1 having built the filtered anchor + 2bit/sizes; pass
+# Depends on LAST/align_to_anchor.sh stage 1 having built the filtered anchor + 2bit/sizes; pass
 # --after <jobid> to chain onto it, or run once that has completed.
 #
-# Usage: ./09_align_minimap2.sh [--dry-run] [--after <jobid>] [--concurrent N]
+# Usage: ./align_to_anchor.sh --projdir <analysis dir> [--dry-run] [--after <jobid>] [--concurrent N]
 set -euo pipefail
 
 # Archived from the reference-bias benchmark. PROJDIR is the ANALYSIS directory (the one holding

@@ -5,7 +5,7 @@
 #   2. align chunks (array): one task per chromosome (>= 10 Mb), plus binned tasks for the
 #                            1-10 Mb remainder, each aligned against the anchor index at -P 1
 #   3. finalize (array)    : per species, concatenate chunk MAFs then chain/net/syntenic-filter
-#                            into results/wga/pairwise/<species>.syntenic.maf  (MULTIZ input)
+#                            into results/wga/pairwise/<species>.syntenic.maf  (input to the projection step)
 #
 # Why chunked: memory tracks query scaffold size (a measured 126 Mb scaffold peaked at 65 GB at
 # -P 1), so whole-genome jobs OOM-killed repeatedly even at 150 GB. Chunking bounds memory

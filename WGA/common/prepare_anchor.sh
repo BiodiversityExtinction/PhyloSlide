@@ -3,7 +3,7 @@
 #
 # Panda carries 73,514 sequences but 94.2% of its length sits in just 24 scaffolds >= 1 Mb.
 # Dropping the rest shrinks the index, removes junk target sequence, and keeps the downstream
-# MULTIZ and window steps from having to deal with tens of thousands of unplaced contigs --
+# projection and window steps from having to deal with tens of thousands of unplaced contigs --
 # windows on those were never usable anyway.
 #
 # lastdb -c is what makes LAST act on the RepeatMasker soft-masking already present in the FASTA

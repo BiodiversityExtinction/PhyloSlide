@@ -1,6 +1,6 @@
 #!/bin/bash
 # Worker: concatenates one species' per-chunk MAFs, then chains, nets, and filters to syntenic
-# blocks -- producing the single <species>.syntenic.maf that MULTIZ consumes. One task per species.
+# blocks -- producing the single <species>.syntenic.maf the projection step consumes. One task per species.
 #
 # Chunking the query is invisible downstream: every chunk was aligned against the same anchor
 # index, so concatenating them reconstitutes the full pairwise alignment before chain/net.

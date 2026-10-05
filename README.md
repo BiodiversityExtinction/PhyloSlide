@@ -104,6 +104,23 @@ Notes:
 
 ---
 
+## Whole-genome alignment (`WGA/`)
+
+PhyloSlide takes one FASTA per taxon, all on the same coordinates. Those usually come from
+mapping reads to a common reference, but they can equally come from aligning assembled genomes.
+`WGA/` holds the two whole-genome alignment pipelines used in the reference-bias benchmark, which
+align each assembly to an anchor genome and project the result back onto anchor coordinates,
+giving pseudo-genome FASTAs that drop straight into `--input`.
+
+| directory | contents |
+| --- | --- |
+| `WGA/common/` | anchor preparation and the projection step, shared by both arms |
+| `WGA/LAST/` | alignment with `lastal` + `last-split` |
+| `WGA/minimap2/` | alignment with `minimap2 -cx asm10` + `paf2chain` |
+
+See `WGA/README.md` for the run order, dependencies, and what is cluster-specific. These are
+archived as run rather than generalised: they assume SLURM and carry absolute tool paths.
+
 ## Input Format
 
 ### Sample Table (`--input`)
