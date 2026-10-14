@@ -573,6 +573,7 @@ def build_run_manifest(args: argparse.Namespace) -> Dict[str, object]:
         "model": str(args.model),
         "bootstrap": int(args.bootstrap),
         "scf": int(args.scf),
+        "scf_method": args.scf_method,
         "iqtree_threads_per_job": int(args.iqtree_threads_per_job),
         "jobs": None if args.jobs is None else int(args.jobs),
         "topofilter": bool(args.topofilter),
@@ -891,7 +892,10 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--bootstrap", type=int, default=1000, help="IQ-TREE ultrafast bootstraps (-bb). Default: 1000")
     ap.add_argument("--iqtree", type=str, default=None,
                     help="IQ-TREE binary to use. Default: auto-detect (iqtree2, then iqtree).")
-    ap.add_argument("--scf", type=int, default=100, help="IQ-TREE site concordance factor reps (--scf). Default: 100")
+    ap.add_argument("--scf", type=int, default=100, help="Quartets sampled for the site concordance factor. Default: 100")
+    ap.add_argument("--scf_method", choices=("likelihood", "parsimony"), default="likelihood",
+                    help="sCF estimator: likelihood (IQ-TREE --scfl, Mo et al. 2023; default) or "
+                         "parsimony (--scf, Minh et al. 2020, superseded).")
 
     # Parallelism
     ap.add_argument(
@@ -1478,19 +1482,40 @@ def main() -> None:
     cf_pref = cf_dir / "Finaltrees"
     cf_log = cf_dir / "Finaltrees.cf.log"
     cf_threads = max(1, min(C, 10))
+
+    # IQ-TREE refuses --scfl together with --gcf, so the two factors are computed in separate
+    # runs. gCF is a count over gene trees and is identical either way; only sCF differs.
     run_cmd(
         [
             IQTREE_BIN,
             "-t", str(ref_tree),
             "--gcf", str(all_trs),
-            "-s", str(all_concat),
-            "--scf", str(args.scf),
             "-nt", str(cf_threads),
             "-pre", str(cf_pref),
             "-redo",
         ],
         cf_log,
     )
+
+    # The parsimony sCF (--scf, Minh et al. 2020) is inflated by homoplasy, which bites hardest on
+    # short internal branches adjacent to long ones -- exactly where concordance is most often
+    # interesting. IQ-TREE itself warns that --scfl supersedes it, so likelihood is the default
+    # here and --scf_method parsimony is kept only for reproducing older analyses.
+    scf_pref = cf_dir / ("Finaltrees.scfl" if args.scf_method == "likelihood" else "Finaltrees.scfp")
+    scf_flag = "--scfl" if args.scf_method == "likelihood" else "--scf"
+    run_cmd(
+        [
+            IQTREE_BIN,
+            "-t", str(ref_tree),
+            "-s", str(all_concat),
+            scf_flag, str(args.scf),
+            "-nt", str(cf_threads),
+            "-pre", str(scf_pref),
+            "-redo",
+        ],
+        cf_dir / "Finaltrees.scf.log",
+    )
+    log(f"  gCF: {cf_pref}.cf.tree   sCF ({args.scf_method}): {scf_pref}.cf.tree", runlog)
 
     # -----------------------------
     # Step 8: Optional topology filter -> dating supermatrix

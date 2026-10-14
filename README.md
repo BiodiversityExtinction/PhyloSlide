@@ -303,7 +303,8 @@ Behavior:
 |---|---|---|
 | `--model` | `GTR+R6` | window trees and the concatenated reference tree |
 | `--bootstrap` | `1000` | IQ-TREE ultrafast bootstrap replicates (`-bb`) |
-| `--scf` | `100` | site concordance factor replicates (`--scf`) |
+| `--scf` | `100` | quartets sampled for the site concordance factor |
+| `--scf_method` | `likelihood` | sCF estimator: `likelihood` (`--scfl`) or `parsimony` (`--scf`) |
 
 `--model` is passed straight to IQ-TREE, so any model string IQ-TREE accepts will
 work. Note that window trees and the concatenated reference use the same model.
@@ -355,9 +356,28 @@ Runs IQ-TREE on:
 
 ## Concordance Factors
 
-When `--runtrees` is enabled:
-- gCF and sCF are computed using IQ-TREE2
-- Outputs in `OUT/trees/concordance/`
+When `--runtrees` is enabled, gCF and sCF are computed with IQ-TREE2 and written to
+`OUT/trees/concordance/`:
+
+| file prefix | contents |
+| --- | --- |
+| `Finaltrees.*` | gene concordance factors (gCF) |
+| `Finaltrees.scfl.*` | site concordance factors, likelihood-based (default) |
+| `Finaltrees.scfp.*` | site concordance factors, parsimony-based (`--scf_method parsimony`) |
+
+These come from two IQ-TREE runs, because `--scfl` cannot be combined with `--gcf` in one
+invocation. gCF is a count over gene trees and is unaffected by the choice of sCF estimator.
+
+**sCF estimator.** The default is the likelihood-based sCF (`--scfl`, Mo et al. 2023). The
+original parsimony-based sCF (`--scf`, Minh et al. 2020) is inflated by homoplasy, and the bias
+is worst on short internal branches adjacent to long ones — often the branches of interest. IQ-TREE
+itself emits a warning recommending `--scfl` when `--scf` is used. `--scf_method parsimony`
+reproduces the older behaviour for comparison with previously published analyses.
+
+Reporting both factors is worth the extra run, because together they separate two situations that
+sCF alone conflates: a branch with high gCF but low sCF is well supported by gene trees while
+individual sites carry little information about it (typically a short branch next to a long one),
+whereas a branch with both low is subject to genuine conflict among genomic regions.
 
 ---
 
@@ -539,7 +559,7 @@ OUT/
     window_logs/
     all_window_trees.trs           gene trees, in kept order
     reference/                     concatenated or ASTRAL reference tree
-    concordance/                   gCF / sCF / discordance factors
+    concordance/                   gCF (Finaltrees.*) and sCF (Finaltrees.scfl.*)
 ```
 
 `<tag>` encodes the filter settings, e.g. `rf2.cov0.1.minbs90.full`, so runs with
